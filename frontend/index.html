@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>180pyugen Web v2.12</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header>
+  <div>
+    <h1>180pyugen Web v2.12</h1>
+    <div class="tag">Image + video VR180 · Python/OpenCV server renderer</div>
+  </div>
+  <div class="modeTabs" role="tablist" aria-label="Workflow">
+    <button id="imageTab" class="modeTab active" type="button">Images</button>
+    <button id="videoTab" class="modeTab" type="button">Video</button>
+    <button id="infoTab" class="modeTab" type="button">Info</button>
+  </div>
+  <div class="uiOptions">
+    <label>Theme<select id="uiTheme"><option value="dark" selected>Dark</option><option value="light">Light</option></select></label>
+  </div>
+  <span id="serverBadge" class="serverBadge">checking server…</span>
+</header>
+
+<main class="app">
+  <div id="imageMode" class="modePane">
+    <section class="panel">
+      <div class="sectionTitle">Still-image VR180</div>
+      <div class="fileBox"><strong>Left image</strong><div id="leftName" class="fileName">not loaded</div><input id="leftFile" type="file" accept="image/*" hidden><button type="button" id="openLeft">Open…</button></div>
+      <div class="fileBox"><strong>Right image</strong><div id="rightName" class="fileName">not loaded</div><input id="rightFile" type="file" accept="image/*" hidden><button type="button" id="openRight">Open…</button></div>
+      <div class="row">
+        <button id="goproPreset">GoPro calibrated preset</button>
+        <button id="em10Preset">EM10 reference preset</button>
+        <span id="sessionInfo" class="small">Choose both images; they are uploaded once to a temporary render session.</span>
+        <span class="privacy">Temporary inputs expire automatically on the server.</span>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="grid">
+        <label>Left profile<select id="leftProfile"></select><span id="leftProfileInfo" class="profileInfo"></span></label>
+        <label>Right profile<select id="rightProfile"></select><span id="rightProfileInfo" class="profileInfo"></span></label>
+        <label>Output height<input id="outHeight" type="number" min="128" max="4096" step="128" value="1024"></label>
+        <label>Roll °<input id="roll" type="number" step="0.01" value="0"></label>
+        <label>Pitch °<input id="pitch" type="number" step="0.01" value="0"></label>
+        <label>Yaw °<input id="yaw" type="number" step="0.01" value="0"></label>
+        <label>Right-eye convergence X °<input id="stereoX" type="number" step="0.01" value="0"></label>
+        <label>Right-eye vertical trim Y °<input id="stereoY" type="number" step="0.01" value="0"></label>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="pointbar">
+        <strong>Corresponding points:</strong>
+        <label class="inline"><input type="radio" name="pickPoint" value="A" checked> Pick A</label>
+        <label class="inline"><input type="radio" name="pickPoint" value="B"> Pick B</label>
+        <label class="inline"><input id="autoMatch" type="checkbox" checked> Native auto-match right</label>
+        <button id="clearPoints">Clear</button>
+        <span class="small">Click the large left view. Python/OpenCV uses the reconstructed 20×20 TM_SQDIFF matcher. Click the right view to override manually.</span>
+      </div>
+      <div class="coords">
+        <span></span><strong>Left X</strong><strong>Left Y</strong><strong>Right X</strong><strong>Right Y</strong>
+        <span>A</span><input class="coord" id="ALx" value="466"><input class="coord" id="ALy" value="757"><input class="coord" id="ARx" value="455"><input class="coord" id="ARy" value="767">
+        <span>B</span><input class="coord" id="BLx" value="1286"><input class="coord" id="BLy" value="823"><input class="coord" id="BRx" value="1271"><input class="coord" id="BRy" value="832">
+      </div>
+    </section>
+
+    <section class="pickGrid">
+      <div class="canvasWrap"><h3>Left — large picking view</h3><canvas id="leftCanvas" class="pickCanvas"></canvas></div>
+      <div class="canvasWrap"><h3>Right — reference / auto-match</h3><canvas id="rightCanvas" class="pickCanvas"></canvas></div>
+    </section>
+
+    <section class="panel">
+      <div class="row">
+        <strong>Stereo Align — final projected eyes</strong>
+        <label>View<select id="overlayMode"><option selected>Perceptual fuse</option><option>Negative align</option><option>Alpha blend</option><option>Difference</option><option>Red/Cyan anaglyph</option></select></label>
+        <label>Opacity<input id="overlayAlpha" type="range" min="0" max="100" value="50"></label>
+        <label>Candidate X px<input id="overlayDx" type="number" step="0.1" value="0" class="smallInput"></label>
+        <label>Candidate Y px<input id="overlayDy" type="number" step="0.1" value="0" class="smallInput"></label>
+        <button id="overlayRefresh">Refresh projected view</button><button id="overlayAuto">Auto projected</button><button id="overlayApply">Apply to output</button><button id="overlayReset">Reset candidate</button>
+        <span id="overlayInfo" class="small">Left panel is the current final stereo. Right panel is the candidate correction.</span>
+      </div>
+      <div class="canvasWrap"><h3>Current alignment | aligned candidate</h3><canvas id="overlayCanvas" class="pickCanvas overlayCanvas"></canvas></div>
+    </section>
+
+    <section class="panel topGap">
+      <div class="row">
+        <button id="renderBtn" class="primary">Render VR180 image</button>
+        <label>Output name<input id="outputName" value="LROut.jpg" class="nameInput"></label>
+        <label>Format<select id="format"><option value="jpeg" selected>JPEG</option><option value="png">PNG</option></select></label>
+        <label id="jpegBox">JPEG quality<input id="jpegQuality" type="number" min="1" max="100" value="95" class="smallInput"></label>
+        <label class="inline"><input id="deleteInputs" type="checkbox" checked> Delete server inputs after result</label>
+        <button id="downloadBtn" disabled>Download output</button>
+      </div>
+      <div class="progress"><div id="progressBar"></div></div>
+      <div id="status" class="status">Load left/right images. The browser handles preview/picking; Python performs matching and final rendering.</div>
+      <div id="resultMeta" class="resultMeta"></div>
+    </section>
+    <section class="panel"><div class="outWrap"><canvas id="outputCanvas"></canvas></div></section>
+  </div>
+
+  <div id="videoMode" class="modePane hidden">
+    <section class="panel">
+      <div class="sectionTitle">Stereo-video VR180 (180Kino workflow)</div>
+      <div class="fileBox"><strong>Left movie</strong><div id="vLeftName" class="fileName">not loaded</div><input id="vLeftFile" type="file" accept="video/*,.mp4,.mov,.m4v,.avi,.mkv,.webm" hidden><button type="button" id="vOpenLeft">Open…</button></div>
+      <div class="fileBox"><strong>Right movie</strong><div id="vRightName" class="fileName">not loaded</div><input id="vRightFile" type="file" accept="video/*,.mp4,.mov,.m4v,.avi,.mkv,.webm" hidden><button type="button" id="vOpenRight">Open…</button></div>
+      <div class="row">
+        <button id="vUploadBtn" class="primary">Upload / inspect pair</button>
+        <button id="vGoproPreset">GoPro calibrated profiles</button>
+        <button id="vEm10Preset">180Kino EM10 profiles</button>
+        <button id="vTutorialPreset">180Kino tutorial preset</button>
+        <span id="vSessionInfo" class="small">Choose two movies. Large files are uploaded only when you inspect or render.</span>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="videoSyncGrid">
+        <label>Reference left frame<input id="vLeftRef" type="number" min="0" step="1" value="0"></label>
+        <label>Reference right frame<input id="vRightRef" type="number" min="0" step="1" value="0"></label>
+        <button id="vLoadRefs">Load reference frames</button>
+        <label>Left start<input id="vLeftStart" type="number" min="0" step="1" value="0"></label>
+        <label>Left end<input id="vLeftEnd" type="number" min="0" step="1" value="0"></label>
+        <label>Right start<input id="vRightStart" type="number" min="0" step="1" value="0"></label>
+        <label>Right end<input id="vRightEnd" type="number" min="0" step="1" value="0"></label>
+        <button id="vSyncFull">Use synchronized remaining length</button>
+        <button id="vClipBtn">JPEG clipping ZIP</button>
+        <button id="vClipDownload" disabled>Download JPEG ZIP</button>
+        <button id="vPrevPair">◀ Previous pair</button>
+        <button id="vNextPair">Next pair ▶</button>
+      </div>
+      <div id="vProbeInfo" class="small topSmallGap"></div>
+    </section>
+
+    <section class="panel">
+      <div class="videoSettingsGrid">
+        <label>Left profile<select id="vLeftProfile"></select><span id="vLeftProfileInfo" class="profileInfo"></span></label>
+        <label>Right profile<select id="vRightProfile"></select><span id="vRightProfileInfo" class="profileInfo"></span></label>
+        <label>Output width<select id="vOutputWidth"><option>2048</option><option selected>4096</option><option>6144</option><option>8192</option></select></label>
+        <label>Sampling<select id="vSampling"><option value="fast" selected>Fast Linear · optimized maps</option><option value="hq">High Quality Lanczos4</option><option value="native">Native-style exact</option></select></label>
+        <label>Codec<select id="vCodec"><option value="auto">Auto</option><option value="hevc" selected>HEVC / H.265 (native-like)</option><option value="hevc-nvenc">HEVC NVENC</option><option value="mp4v">mp4v</option><option value="avc1">H.264 / avc1</option><option value="MJPG">MJPG</option></select></label>
+        <label>Timing<select id="vFpsMode"><option value="kino" selected>180Kino rounded FPS</option><option value="source">Preserve source FPS</option></select></label>
+        <label>Roll °<input id="vRoll" type="number" step="0.01" value="0"></label>
+        <label>Pitch °<input id="vPitch" type="number" step="0.01" value="0"></label>
+        <label>Yaw °<input id="vYaw" type="number" step="0.01" value="0"></label>
+        <label>Right-eye convergence X °<input id="vStereoX" type="number" step="0.01" value="0"></label>
+        <label>Right-eye vertical trim Y °<input id="vStereoY" type="number" step="0.01" value="0"></label>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="pointbar">
+        <strong>Reference A/B:</strong>
+        <label class="inline"><input type="radio" name="vPickPoint" value="A" checked> Pick A</label>
+        <label class="inline"><input type="radio" name="vPickPoint" value="B"> Pick B</label>
+        <label class="inline"><input id="vAutoMatch" type="checkbox" checked> Native auto-match right</label>
+        <button id="vClearPoints">Clear</button>
+        <span class="small">Pick A/B on the synchronized reference frames. The same fixed 3-D alignment is then used for every converted frame.</span>
+      </div>
+      <div class="coords">
+        <span></span><strong>Left X</strong><strong>Left Y</strong><strong>Right X</strong><strong>Right Y</strong>
+        <span>A</span><input class="vcoord" id="vALx" value="466"><input class="vcoord" id="vALy" value="757"><input class="vcoord" id="vARx" value="455"><input class="vcoord" id="vARy" value="767">
+        <span>B</span><input class="vcoord" id="vBLx" value="1286"><input class="vcoord" id="vBLy" value="823"><input class="vcoord" id="vBRx" value="1271"><input class="vcoord" id="vBRy" value="832">
+      </div>
+    </section>
+
+    <section class="pickGrid videoReferenceGrid">
+      <div class="canvasWrap"><h3>Left reference frame — large picking view</h3><canvas id="vLeftCanvas" class="pickCanvas"></canvas></div>
+      <div class="canvasWrap"><h3>Right reference frame — auto-match / override</h3><canvas id="vRightCanvas" class="pickCanvas"></canvas></div>
+    </section>
+
+    <section class="panel">
+      <div class="row">
+        <strong>Video Stereo Align — final projected eyes</strong>
+        <label>View<select id="vOverlayMode"><option selected>Perceptual fuse</option><option>Negative align</option><option>Alpha blend</option><option>Difference</option><option>Red/Cyan anaglyph</option></select></label>
+        <label>Opacity<input id="vOverlayAlpha" type="range" min="0" max="100" value="50"></label>
+        <label>Candidate X px<input id="vOverlayDx" type="number" step="0.1" value="0" class="smallInput"></label>
+        <label>Candidate Y px<input id="vOverlayDy" type="number" step="0.1" value="0" class="smallInput"></label>
+        <button id="vOverlayRefresh">Refresh projected view</button><button id="vOverlayAuto">Auto projected</button><button id="vOverlayApply">Apply to output</button><button id="vOverlayReset">Reset candidate</button>
+        <span id="vOverlayInfo" class="small">Left panel is the current rendered reference stereo. Right panel is the candidate correction.</span>
+      </div>
+      <div class="canvasWrap"><h3>Current alignment | aligned candidate</h3><canvas id="vOverlayCanvas" class="pickCanvas overlayCanvas"></canvas></div>
+    </section>
+
+    <section class="panel topGap">
+      <div class="row">
+        <button id="vRenderBtn" class="primary">Start video conversion</button>
+        <label>Output name<input id="vOutputName" value="VROut.mp4" class="nameInput"></label>
+        <label class="inline"><input id="vDeleteInputs" type="checkbox"> Delete server movies after result</label>
+        <button id="vDownloadBtn" disabled>Download video</button>
+      </div>
+      <div class="progress"><div id="vProgressBar"></div></div>
+      <div id="vStatus" class="status">Choose left/right movies, upload them, then load synchronized reference frames.</div>
+      <div id="vResultMeta" class="resultMeta"></div>
+    </section>
+    <section class="panel" id="vOutputInspectorPanel">
+      <div class="sectionTitle">Generated video — unified player / frame inspector</div>
+      <div class="unifiedVideoInspector">
+        <div class="videoInspectViewport" id="vInspectViewport">
+          <video id="vResultVideo" controls playsinline preload="metadata"></video>
+          <canvas id="vCheckCanvas" class="videoFrameOverlay hidden"></canvas>
+        </div>
+        <div class="row frameInspectControls">
+          <button id="vCheckPrev" disabled>◀ Previous</button>
+          <button id="vCheckNext" disabled>Next ▶</button>
+          <label>Frame<input id="vCheckFrame" type="number" min="0" step="1" value="0" disabled class="smallInput"></label>
+          <input id="vCheckSlider" class="frameSlider" type="range" min="0" max="0" value="0" disabled>
+          <button id="vResumePlayback" disabled>Return to playback</button>
+          <span id="vCheckInfo" class="small">Generate a video to inspect individual output frames.</span>
+        </div>
+        <div class="small previewNote">The same viewport is used for playback and exact-frame inspection. Playback uses the H.264 proxy; Download video keeps the full-resolution render.</div>
+      </div>
+    </section>
+  </div>
+
+  <div id="infoMode" class="modePane hidden">
+    <section class="panel infoPage">
+      <h2>180pyugen — Info</h2>
+      <p class="lead">This page describes the complete conversion pipeline, how stereo alignment differs from simple 2-D image shifting, where the camera/lens model is applied, and which options affect quality or performance.</p>
+
+      <h3>1. System overview</h3>
+      <p>180pyugen converts a synchronized pair of fisheye cameras into VR180 side-by-side equirectangular output. Each eye occupies a square 180° × 180° field. The two eye squares are packed side by side to produce the familiar 2:1 stereo frame.</p>
+      <p>The central design principle is that lens correction and stereo alignment are separate operations. The lens profile converts between fisheye image radius and 3-D ray angle. A/B correspondence points recover the relative 3-D orientation between cameras. Keeping those problems separate makes the renderer more stable and prevents a local 2-D correction from being mistaken for camera calibration.</p>
+
+      <h3>2. Still-image pipeline</h3>
+      <ol>
+        <li><strong>Decode:</strong> read left and right source rasters. OpenCV is the normal decoder; Pillow can be used diagnostically on desktop.</li>
+        <li><strong>Resolve profiles:</strong> determine 180° radius, optical center and projection function independently for each eye.</li>
+        <li><strong>Pixel → ray:</strong> convert A/B source pixels into normalized 3-D viewing rays using the inverse fisheye projection.</li>
+        <li><strong>Stereo rotation:</strong> align right A to left A using the shortest Rodrigues rotation, then rotate around A so right B agrees with left B.</li>
+        <li><strong>Output ray field:</strong> generate a 180° × 180° equirectangular direction for every destination pixel.</li>
+        <li><strong>Zenith correction:</strong> apply roll, pitch and yaw in 3-D.</li>
+        <li><strong>Ray → fisheye:</strong> project each destination ray back into the relevant source image.</li>
+        <li><strong>Sample and pack:</strong> sample left/right sources, create one square eye per view, then pack them side by side.</li>
+      </ol>
+
+      <h3>3. Video pipeline</h3>
+      <p>Video uses the same geometry but separates one-time setup from per-frame work. When both movies are selected, the browser now uploads/probes them and automatically displays the current left/right reference frames. The explicit <em>Load reference frames</em> button remains useful after changing the frame numbers.</p>
+      <ol>
+        <li>Probe both movies for resolution, frame count, FPS and codec.</li>
+        <li>Choose synchronized reference frame numbers.</li>
+        <li>Display those frames and choose/match A/B.</li>
+        <li>Compute stereo rotation, zenith rotation and complete source-coordinate maps once.</li>
+        <li>Seek to the requested start frames and then decode sequential frame pairs.</li>
+        <li>Reuse the precomputed remap for every frame pair.</li>
+        <li>Apply optional final right-eye convergence/vertical trim.</li>
+        <li>Encode the resulting SBS frame to the selected codec.</li>
+      </ol>
+      <p>Because map construction is removed from the frame loop, ordinary conversion is much faster than repeatedly invoking a complete still-image renderer.</p>
+
+      <h3>4. Camera/lens model</h3>
+      <p>A profile defines three things: the radius corresponding to a 90° off-axis ray, the optical-axis coordinate, and the radial projection function. Supported models include orthographic, equisolid, arbitrary <code>y=A·sin(kθ)</code>, and custom piecewise modes.</p>
+      <p>180Augen and 180Kino custom mode 3 are intentionally distinguished. The supplied 180Kino profiles/documentation use a piecewise quadratic <code>y=aθ²+bθ+c</code>; the recovered 180Augen executable follows a different custom expression. The program preserves that distinction rather than forcing both profile families through one approximation.</p>
+
+      <h3>5. A/B matching and 3-D stereo alignment</h3>
+      <p>A/B should normally be placed on distant, high-contrast structure with relatively little parallax and a useful angular separation. In the reconstructed still workflow, 180Augen uses a 20×20 <code>TM_SQDIFF</code> template; 180Kino uses 20×20 <code>TM_SQDIFF_NORMED</code>. Lower score is better in both cases.</p>
+      <p>Matching only identifies corresponding pixels. The important correction happens after those pixels are converted to rays: a 3-D rotation aligns the camera coordinate systems. That differs from simply translating one flat picture over the other.</p>
+
+      <h3>6. Stereo Align inspector</h3>
+      <p>The alignment inspector now defaults to Perceptual fuse, which is the best flat-screen proxy of what the final stereo pair will look like after the current convergence/vertical-trim candidate is applied. Negative Align, alpha blend, difference and red/cyan anaglyph remain available as diagnostic views. Apply to output writes the candidate directly into the real final stereo render.</p>
+      <p>If the final projected output still contains a small global residual disparity, use right-eye convergence X or vertical trim Y. These operate in VR degrees on the rendered right eye. Large corrections usually indicate that A/B selection or lens calibration should be revisited instead.</p>
+
+      <h3>7. Sampling quality modes</h3>
+      <table class="infoTable"><tr><th>Mode</th><th>Mechanics</th><th>Use</th></tr>
+        <tr><td>Fast</td><td>OpenCV remap with precomputed/optimized maps</td><td>Normal video conversion; best throughput</td></tr>
+        <tr><td>HQ</td><td>Lanczos4 interpolation on the same geometry</td><td>Fine-detail resampling when CPU time is available</td></tr>
+        <tr><td>Native</td><td>Reconstructed native-style interpolation path</td><td>Parity testing and reverse-engineering comparisons</td></tr>
+      </table>
+      <p>Fast mode can convert floating maps into OpenCV's fixed-point representation once, reducing map memory traffic. OpenCV often runs its own threads, so 180pyugen avoids blindly adding another eye-level thread layer when that would oversubscribe the CPU.</p>
+
+      <h3>8. Video encoding and timing</h3>
+      <p>HEVC/H.265 is the native-oriented video choice. Software HEVC is reproducible on ordinary systems; HEVC NVENC can offload encoding to supported NVIDIA hardware. Encoding acceleration is separate from fisheye remapping—the geometry remains a CPU/OpenCV operation in the portable path.</p>
+      <p>The 180Kino timing option rounds the source frame rate in the manner observed in the supplied native output (for example approximately 59.94 fps → 60 fps). Preserve-source mode keeps the reported input FPS instead. Audio is not currently muxed by the compatibility path.</p>
+
+      <h3>9. Web/server architecture</h3>
+      <p>The browser handles interaction: local file selection, previews, point picking, Stereo Align visualization, job progress and result playback. Python/FastAPI remains authoritative for decoding server-side media, native-style matching, profile evaluation, geometry, rendering and encoding.</p>
+      <p>Files are stored in temporary session directories. Development mode uses an inline background executor. A production deployment can use Redis/RQ warm workers so long 4K/8K jobs do not block HTTP request handling. Repeated renders reuse the already-uploaded video pair until the session expires or is deleted.</p>
+
+      <h3>10. Native parity status</h3>
+      <p>180pyugen is a clean-room reconstruction rather than the original source. Several still-image behaviors have been recovered and quantitatively validated against native 180Augen output. The original 180Kino used CUDA and a GPU conversion kernel, so exact video pixel parity remains an explicit comparison target. The application therefore exposes separate performance and native-comparison modes instead of claiming that every optimized path is instruction-identical.</p>
+    </section>
+  </div>
+
+</main>
+<script src="app.js"></script>
+</body>
+</html>

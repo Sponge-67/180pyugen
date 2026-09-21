@@ -1,0 +1,42 @@
+:root{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif;color:#111;background:#f4f4f4}*{box-sizing:border-box}body{margin:0}header{padding:10px 14px;background:#fff;border-bottom:1px solid #bbb;display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:20}header h1{font-size:18px;margin:0}header .tag{font-size:12px;color:#555}.app{padding:10px}.hidden{display:none!important}.panel{background:#fff;border:1px solid #bbb;border-radius:5px;padding:10px;margin-bottom:10px}.sectionTitle{font-size:15px;font-weight:700;margin-bottom:8px}.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.grid{display:grid;grid-template-columns:repeat(6,minmax(100px,1fr));gap:8px;align-items:end}.videoSettingsGrid{display:grid;grid-template-columns:2fr 2fr repeat(6,minmax(90px,1fr));gap:8px;align-items:end}.videoSyncGrid{display:grid;grid-template-columns:repeat(8,minmax(90px,1fr));gap:8px;align-items:end}label{font-size:12px;font-weight:600;display:flex;flex-direction:column;gap:3px}label.inline{display:inline-flex;flex-direction:row;align-items:center;gap:5px;font-weight:500}input,select,button{font:inherit;padding:6px 8px;border:1px solid #999;border-radius:4px;background:#fff}button{cursor:pointer}button.primary{background:#202020;color:#fff;border-color:#202020}button:disabled{opacity:.45;cursor:not-allowed}.fileBox{display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center;margin-bottom:6px}.fileName{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#444;font-size:12px}.pickGrid{display:grid;grid-template-columns:minmax(360px,1fr) minmax(360px,1fr);gap:12px;min-height:0}.canvasWrap{position:relative;background:#181818;border:1px solid #777;border-radius:4px;overflow:hidden;min-height:480px}.canvasWrap h3{position:absolute;z-index:2;top:4px;left:7px;margin:0;padding:2px 5px;background:rgba(255,255,255,.85);font-size:12px;border-radius:3px}.pickCanvas{width:100%;height:100%;display:block;min-height:480px}.pointbar{display:flex;gap:8px;align-items:center;margin:8px 0;flex-wrap:wrap}.coords{display:grid;grid-template-columns:80px repeat(4,100px);gap:5px;align-items:center}.coords span{font-size:12px;font-weight:700}.coords input{width:100%}.status{font-size:12px;padding:6px 8px;background:#f0f0f0;border:1px solid #ccc;border-radius:4px;min-height:30px}.progress{width:100%;height:10px;background:#ddd;border-radius:8px;overflow:hidden;margin-top:8px}.progress>div{height:100%;width:0;background:#444;transition:width .1s}.outWrap{background:#111;border:1px solid #777;min-height:220px;display:flex;align-items:center;justify-content:center;overflow:auto}.outWrap canvas{max-width:100%;height:auto}.videoOutWrap{background:#111;border:1px solid #777;min-height:260px;display:flex;align-items:center;justify-content:center}.videoOutWrap video{max-width:100%;max-height:70vh}.small{font-size:11px;color:#666}.danger{color:#8a1c1c}.profileInfo{font-size:11px;color:#555;min-height:30px}.serverBadge{font-size:11px;padding:3px 7px;border:1px solid #aaa;border-radius:999px;background:#f7f7f7;margin-left:auto}.serverBadge.ok{background:#eaf7ea;border-color:#8fbd8f}.serverBadge.bad{background:#fdecec;border-color:#d79a9a}.privacy{font-size:11px;color:#555;margin-left:auto}.busy{cursor:progress}.hint{padding:7px 9px;background:#f2f2f2;border:1px solid #ccc;border-radius:4px;font-size:12px;margin-bottom:8px}.resultMeta{font-size:11px;color:#555}.modeTabs{display:flex;border:1px solid #999;border-radius:5px;overflow:hidden}.modeTab{border:0;border-radius:0;padding:6px 18px}.modeTab.active{background:#202020;color:#fff}.topGap{margin-top:10px}.topSmallGap{margin-top:6px}.nameInput{width:180px}.smallInput{width:70px}
+@media(max-width:1200px){.videoSettingsGrid{grid-template-columns:repeat(4,1fr)}.videoSyncGrid{grid-template-columns:repeat(4,1fr)}}
+@media(max-width:1000px){header{flex-wrap:wrap}.grid{grid-template-columns:repeat(3,1fr)}.pickGrid{grid-template-columns:1fr}.canvasWrap,.pickCanvas{min-height:360px}.coords{grid-template-columns:70px repeat(2,1fr)}.videoSettingsGrid,.videoSyncGrid{grid-template-columns:repeat(2,1fr)}}
+
+.overlayCanvas{min-height:380px;height:52vh;max-height:720px;}
+
+.infoPage{max-width:1180px;margin:0 auto;line-height:1.55}.infoPage h2{margin-top:0}.infoPage h3{margin-top:28px;border-bottom:1px solid #ddd;padding-bottom:4px}.infoPage .lead{font-size:15px;color:#333}.infoPage ol{padding-left:24px}.infoPage code{background:#f1f1f1;padding:1px 4px;border-radius:3px}.infoTable{width:100%;border-collapse:collapse;margin:10px 0 16px}.infoTable th,.infoTable td{border:1px solid #bbb;padding:8px;text-align:left;vertical-align:top}.infoTable th{background:#f1f1f1}
+
+
+/* v2.8 theme + layout system -------------------------------------------------
+   The original CSS remains as a light fallback.  These variable-driven rules
+   are appended so switching themes does not require rebuilding the DOM. */
+body.theme-dark{--bg:#111317;--panel:#1b1f24;--panel2:#242a31;--fg:#e8edf2;--muted:#9aa6b2;--border:#3b4652;--field:#12161a;--accent:#4d8dff;--canvas:#080a0d;background:var(--bg);color:var(--fg)}
+body.theme-dark header,body.theme-dark .panel{background:var(--panel);border-color:var(--border);color:var(--fg)}
+body.theme-dark header .tag,body.theme-dark .small,body.theme-dark .privacy,body.theme-dark .profileInfo,body.theme-dark .resultMeta,body.theme-dark .infoPage .lead{color:var(--muted)}
+body.theme-dark input,body.theme-dark select,body.theme-dark button{background:var(--field);color:var(--fg);border-color:var(--border)}
+body.theme-dark button.primary,body.theme-dark .modeTab.active{background:var(--accent);border-color:var(--accent);color:white}
+body.theme-dark .status,body.theme-dark .hint,body.theme-dark .serverBadge{background:var(--panel2);border-color:var(--border);color:var(--fg)}
+body.theme-dark .canvasWrap,body.theme-dark .outWrap,body.theme-dark .videoOutWrap,body.theme-dark .frameCheckWrap{background:var(--canvas);border-color:var(--border)}
+body.theme-dark .canvasWrap h3{background:rgba(20,24,29,.88);color:var(--fg)}
+body.theme-dark .progress{background:#303740}body.theme-dark .progress>div{background:var(--accent)}
+body.theme-dark .infoPage code,body.theme-dark .infoTable th{background:var(--panel2);color:var(--fg)}
+body.theme-dark .infoTable th,body.theme-dark .infoTable td{border-color:var(--border)}
+.uiOptions{display:flex;gap:6px;align-items:center;margin-left:auto}.uiOptions label{min-width:90px}.uiOptions select{padding:4px 6px}
+.frameSlider{flex:1;min-width:260px}.frameCheckWrap{margin-top:8px;background:#111;border:1px solid #777;min-height:360px;display:flex;align-items:center;justify-content:center;overflow:auto}.frameCheckWrap canvas{display:block;max-width:100%;height:auto}
+@media(max-width:900px){.uiOptions{order:5;width:100%;margin-left:0}.frameSlider{min-width:160px}}
+
+/* v2.9: equal panes and aspect-ratio-aware video reference frames. */
+.videoReferenceGrid{align-items:start;min-height:0}
+.videoReferenceGrid .canvasWrap{min-height:0;aspect-ratio:4/3}
+.videoReferenceGrid .pickCanvas{min-height:0;height:100%}
+.outputInspectGrid{display:grid;grid-template-columns:minmax(420px,1fr) minmax(420px,1fr);gap:12px;align-items:start}
+.outputInspectGrid .videoOutWrap{min-height:0;display:block;padding:8px}
+.outputInspectGrid .videoOutWrap video{display:block;width:100%;height:auto;max-height:62vh;background:#000}
+.previewNote{padding-top:6px}
+.frameInspector{min-width:0}
+.frameInspector .frameCheckWrap{min-height:260px;margin-top:8px}
+@media(max-width:1100px){.outputInspectGrid{grid-template-columns:1fr}.pickGrid{grid-template-columns:1fr}}
+
+
+/* v2.10: one visual surface for playback and per-frame inspection. */
+.unifiedVideoInspector{display:grid;gap:10px}.videoInspectViewport{position:relative;width:100%;background:#090b0f;border:1px solid var(--border);border-radius:8px;overflow:hidden;aspect-ratio:2/1;min-height:280px}.videoInspectViewport video,.videoInspectViewport canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#090b0f}.videoFrameOverlay{z-index:2;pointer-events:none}.frameInspectControls{align-items:center}.frameInspectControls .frameSlider{flex:1;min-width:220px}

@@ -1,0 +1,48 @@
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    restart: unless-stopped
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      PYUGEN_QUEUE: render
+      PYUGEN_DATA_ROOT: /data/180pyugen
+      PYUGEN_MAX_UPLOAD_MB: 120
+      PYUGEN_MAX_VIDEO_UPLOAD_MB: 4096
+      PYUGEN_MAX_OUTPUT_HEIGHT: 4096
+      PYUGEN_SESSION_TTL: 7200
+      PYUGEN_RESULT_TTL: 7200
+    volumes:
+      - pyugen_data:/data/180pyugen
+    ports:
+      - "8080:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: .
+    restart: unless-stopped
+    command: ["rq", "worker", "--url", "redis://redis:6379/0", "render"]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      PYUGEN_QUEUE: render
+      PYUGEN_DATA_ROOT: /data/180pyugen
+      PYUGEN_MAX_OUTPUT_HEIGHT: 4096
+    volumes:
+      - pyugen_data:/data/180pyugen
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  pyugen_data:
