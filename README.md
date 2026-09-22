@@ -261,3 +261,23 @@ The projected Stereo Align inspector no longer presents an unexplained black can
 ## v2.12 fused alignment preview
 
 The Stereo Align window now defaults to **Perceptual fuse**. This is a best-effort flat-screen proxy of the final projected stereo pair after the current candidate correction is applied. Adjusting the candidate and pressing **Apply to output** writes those values directly into the final convergence/vertical-trim controls used by rendering.
+
+
+## v2.13 reference-timeline and unequal-length controls
+
+* **Trim to shorter remaining** is the old synchronized-length behavior: it truncates both sides to the shorter remaining movie and adds no frames.
+* **Use full remaining + extend shorter** keeps every selected real frame and defaults to repeating the shorter eye's final frame. A black-frame extension mode is also available.
+* Reference canvases default to safe Navigate mode. Drag pans, the mouse wheel zooms, and **1:1 full resolution** shows native source pixels. A/B edits are one-shot and return immediately to Navigate mode.
+* Zoom and normalized pan center are preserved while Previous/Next pair changes the actual frame, making small clocks, timers, LEDs, clappers, and other synchronization clues practical to inspect.
+* Each reference canvas overlays its current frame number, zoom level, and A/B reference coordinates.
+
+## v2.14 reference-view UI refinements
+
+- Reference-frame titles and frame/coordinate metadata are drawn directly over the image without opaque information boxes.
+- A/B placement switches the reference canvas cursor to a normal arrow; navigation mode returns to the grab cursor.
+- Upper video synchronization, profile, and A/B control panels use tighter spacing and shorter labels so more of the reference images stay visible.
+
+
+## v2.15 GoPro video-preset correction
+
+The GoPro video button now selects only the calibrated left/right lens profiles and **preserves the video's A/B points**. Earlier builds incorrectly copied A/B from the supplied 1792x2048 still calibration scene into unrelated video. A/B are capture-specific stereo-correspondence points, not lens-calibration constants, so that could apply a completely wrong 3-D stereo rotation. The UI also warns when a video frame's aspect ratio differs materially from the 1792x2048 calibration source because a different GoPro digital-lens/crop/stabilisation mode may require video-specific calibration.

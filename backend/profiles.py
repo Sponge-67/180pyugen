@@ -29,10 +29,15 @@ def profile_info(name: str, side: str, width: int, height: int) -> dict:
     p = resolve_profile(name, side, width, height)
     cx, cy = engine.calculate_optical_axis(p, width, height)
     radius = engine.calculate_radius(p, width, height)
-    return {
+    info = {
         "name": p.name,
         "radius": float(radius),
         "axis": [float(cx), float(cy)],
         "projection_mode": int(p.projection.mode),
         "k": float(p.projection.k),
     }
+    if name in (GOPRO_L, GOPRO_R):
+        ok, warning = engine.gopro_calibration_compatibility(width, height)
+        info["calibration_compatible"] = bool(ok)
+        info["calibration_warning"] = "" if ok else warning
+    return info

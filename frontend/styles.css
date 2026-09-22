@@ -40,3 +40,23 @@ body.theme-dark .infoTable th,body.theme-dark .infoTable td{border-color:var(--b
 
 /* v2.10: one visual surface for playback and per-frame inspection. */
 .unifiedVideoInspector{display:grid;gap:10px}.videoInspectViewport{position:relative;width:100%;background:#090b0f;border:1px solid var(--border);border-radius:8px;overflow:hidden;aspect-ratio:2/1;min-height:280px}.videoInspectViewport video,.videoInspectViewport canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#090b0f}.videoFrameOverlay{z-index:2;pointer-events:none}.frameInspectControls{align-items:center}.frameInspectControls .frameSlider{flex:1;min-width:220px}
+
+.videoReferenceGrid .pickCanvas{cursor:grab;touch-action:none;}
+.videoReferenceGrid .pickCanvas:active{cursor:grabbing;}
+
+/* v2.14: compact synchronization controls and unobtrusive in-frame labels. */
+.videoCompactPanel{padding:6px;margin-bottom:6px}
+.videoCompactPanel .sectionTitle{margin-bottom:5px}
+.videoCompactPanel input,.videoCompactPanel select,.videoCompactPanel button{padding:4px 6px}
+.videoCompactPanel .fileBox{margin-bottom:3px;gap:5px}
+.videoCompactPanel .row,.videoCompactPanel .pointbar{gap:5px}
+.videoCompactPanel .videoSyncGrid,.videoCompactPanel .videoSettingsGrid{gap:5px}
+.compactPointbar{margin:3px 0}
+.videoReferenceGrid{gap:8px}
+.videoReferenceGrid .canvasWrap h3{
+  top:4px;left:7px;padding:0;background:transparent;border-radius:0;
+  color:#fff;text-shadow:0 1px 2px #000,1px 0 1px #000;font-size:11px;
+}
+.videoReferenceGrid .pickCanvas{cursor:grab;touch-action:none}
+.videoReferenceGrid .pickCanvas.pointPick{cursor:default!important}
+.videoReferenceGrid .pickCanvas.pointPick:active{cursor:default!important}

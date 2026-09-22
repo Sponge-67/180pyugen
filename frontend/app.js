@@ -34,11 +34,11 @@ const state={
   resultURL:null,resultName:'LROut.jpg',maxOutputHeight:4096,alignBitmap:null,alignAuto:[0,0,0],alignScale:1,alignRequestId:0
 };
 const vstate={
-  left:{file:null,bitmap:null,width:0,height:0,transform:null},
-  right:{file:null,bitmap:null,width:0,height:0,transform:null},
+  left:{file:null,bitmap:null,width:0,height:0,transform:null,view:{zoom:1,centerX:.5,centerY:.5}},
+  right:{file:null,bitmap:null,width:0,height:0,transform:null,view:{zoom:1,centerX:.5,centerY:.5}},
   sessionId:null,sessionVersion:0,uploadedVersion:-1,uploadPromise:null,
   leftInfo:null,rightInfo:null,
-  points:{A:[[466,757],[455,767]],B:[[1286,823],[1271,832]]},active:'A',
+  points:{A:[[466,757],[455,767]],B:[[1286,823],[1271,832]]},active:null,navDrag:null,
   resultURL:null,resultName:'VROut.mp4',previewURL:null,clipURL:null,clipName:'cut_img.zip',alignBitmap:null,alignAuto:[0,0,0],alignScale:1,alignRequestId:0,
   resultFrames:0,resultFps:0,checkedFrame:0
 };
@@ -140,7 +140,7 @@ async function syncSession(){
 async function deleteSession(){if(!state.sessionId)return;const sid=state.sessionId;state.sessionId=null;state.uploadedVersion=-1;try{await fetch(`/api/session/${sid}`,{method:'DELETE'})}catch{}$('#sessionInfo').textContent='Server inputs deleted. They will re-upload automatically if needed.'}
 async function refreshProfileInfo(){
   for(const side of ['left','right']){const s=state[side],out=$(side==='left'?'#leftProfileInfo':'#rightProfileInfo'),sel=$(side==='left'?'#leftProfile':'#rightProfile');if(!sel?.value)continue;if(!s.width){out.textContent='';continue}
-    try{const q=new URLSearchParams({name:sel.value,side:side==='left'?'L':'R',width:s.width,height:s.height});const p=await api('/api/profile-info?'+q);out.textContent=`axis (${p.axis[0].toFixed(2)}, ${p.axis[1].toFixed(2)}) · radius ${p.radius.toFixed(2)} · mode ${p.projection_mode} · k ${p.k.toFixed(4)}`}catch(e){out.textContent=e.message}}
+    try{const q=new URLSearchParams({name:sel.value,side:side==='left'?'L':'R',width:s.width,height:s.height});const p=await api('/api/profile-info?'+q);out.textContent=`axis (${p.axis[0].toFixed(2)}, ${p.axis[1].toFixed(2)}) · radius ${p.radius.toFixed(2)} · mode ${p.projection_mode} · k ${p.k.toFixed(4)}`+(p.calibration_warning?` · WARNING: ${p.calibration_warning}`:'')}catch(e){out.textContent=e.message}}
 }
 function drawSide(side){fitDraw($(side==='left'?'#leftCanvas':'#rightCanvas'),state[side].bitmap,state[side],state.points,side)}
 function _diagPixels(sbs,mode,alpha,dx,dy){
@@ -274,14 +274,51 @@ function vStepReferencePair(delta){
   vLoadRefs();
 }
 async function refreshVideoProfileInfo(){
-  for(const side of ['left','right']){const info=side==='left'?vstate.leftInfo:vstate.rightInfo,out=$(side==='left'?'#vLeftProfileInfo':'#vRightProfileInfo'),sel=$(side==='left'?'#vLeftProfile':'#vRightProfile');if(!sel?.value||!info){out.textContent='';continue}try{const q=new URLSearchParams({name:sel.value,side:side==='left'?'L':'R',width:info.width,height:info.height});const p=await api('/api/profile-info?'+q);out.textContent=`axis (${p.axis[0].toFixed(2)}, ${p.axis[1].toFixed(2)}) · radius ${p.radius.toFixed(2)} · mode ${p.projection_mode} · k ${p.k.toFixed(4)}`}catch(e){out.textContent=e.message}}
+  for(const side of ['left','right']){const info=side==='left'?vstate.leftInfo:vstate.rightInfo,out=$(side==='left'?'#vLeftProfileInfo':'#vRightProfileInfo'),sel=$(side==='left'?'#vLeftProfile':'#vRightProfile');if(!sel?.value||!info){out.textContent='';continue}try{const q=new URLSearchParams({name:sel.value,side:side==='left'?'L':'R',width:info.width,height:info.height});const p=await api('/api/profile-info?'+q);out.textContent=`axis (${p.axis[0].toFixed(2)}, ${p.axis[1].toFixed(2)}) · radius ${p.radius.toFixed(2)} · mode ${p.projection_mode} · k ${p.k.toFixed(4)}`+(p.calibration_warning?` · WARNING: ${p.calibration_warning}`:'')}catch(e){out.textContent=e.message}}
 }
-function vDrawSide(side){fitDraw($(side==='left'?'#vLeftCanvas':'#vRightCanvas'),vstate[side].bitmap,vstate[side],vstate.points,side)}
+function vClampView(side){
+  const s=vstate[side],v=s.view,b=s.bitmap,c=$(side==='left'?'#vLeftCanvas':'#vRightCanvas');if(!b||!c)return;
+  const r=c.getBoundingClientRect(),fit=Math.min(r.width/b.width,r.height/b.height),sc=fit*Math.max(1,v.zoom);
+  let cx=v.centerX*b.width,cy=v.centerY*b.height;
+  if(b.width*sc<=r.width)cx=b.width/2;else{const h=r.width/(2*sc);cx=Math.max(h,Math.min(b.width-h,cx))}
+  if(b.height*sc<=r.height)cy=b.height/2;else{const h=r.height/(2*sc);cy=Math.max(h,Math.min(b.height-h,cy))}
+  v.centerX=cx/b.width;v.centerY=cy/b.height;
+}
+function vDrawSide(side){
+  const canvas=$(side==='left'?'#vLeftCanvas':'#vRightCanvas'),s=vstate[side],bmp=s.bitmap,dpr=devicePixelRatio||1,r=canvas.getBoundingClientRect(),cw=Math.max(1,r.width),ch=Math.max(1,r.height);
+  canvas.width=Math.round(cw*dpr);canvas.height=Math.round(ch*dpr);const c=canvas.getContext('2d');c.setTransform(dpr,0,0,dpr,0,0);c.clearRect(0,0,cw,ch);c.fillStyle='#090b0f';c.fillRect(0,0,cw,ch);if(!bmp){s.transform=null;return}
+  vClampView(side);const v=s.view,fit=Math.min(cw/bmp.width,ch/bmp.height),sc=fit*Math.max(1,v.zoom),cx=v.centerX*bmp.width,cy=v.centerY*bmp.height,dw=bmp.width*sc,dh=bmp.height*sc,dx=cw/2-cx*sc,dy=ch/2-cy*sc;
+  c.drawImage(bmp,dx,dy,dw,dh);s.transform={scale:sc,dx,dy};const si=side==='left'?0:1;
+  for(const lab of ['A','B']){const p=vstate.points[lab][si];if(!p)continue;const x=dx+p[0]*sc,y=dy+p[1]*sc;c.strokeStyle=lab==='A'?'#ff3030':'#00cfff';c.lineWidth=2;c.strokeRect(x-5,y-5,10,10);c.fillStyle=c.strokeStyle;c.font='bold 13px system-ui';c.fillText(lab,x+7,y-7)}
+  const frame=Math.trunc(+(side==='left'?$('#vLeftRef').value:$('#vRightRef').value)||0),fmt=p=>p?`${Math.round(p[0])},${Math.round(p[1])}`:'—',A=vstate.points.A[si],B=vstate.points.B[si];
+  c.font='600 12px system-ui';const line1=`${side==='left'?'L':'R'} frame ${frame}   zoom ${Math.round(v.zoom*100)}%`,line2=`Reference coordinates  A ${fmt(A)}   B ${fmt(B)}`;
+  // Draw metadata directly over the frame with a one-pixel shadow.  No opaque
+  // background is used, so synchronization details never hide the footage.
+  c.fillStyle='#000';c.fillText(line1,13,29);c.fillStyle='#f3f7fb';c.fillText(line1,12,28);
+  c.font='11px system-ui';c.fillStyle='#000';c.fillText(line2,13,46);c.fillStyle='#9eddf1';c.fillText(line2,12,45);
+}
 function vRedraw(){vDrawSide('left');vDrawSide('right');vDrawOverlay()}
 function vSyncCoords(){for(const lab of ['A','B'])for(const [si,side] of ['left','right'].entries()){const p=vstate.points[lab][si];const prefix='v'+lab+(side==='left'?'L':'R');$('#'+prefix+'x').value=p?.[0]??'';$('#'+prefix+'y').value=p?.[1]??''}}
 function vReadCoords(){for(const lab of ['A','B']){const vals=['Lx','Ly','Rx','Ry'].map(k=>Number($('#v'+lab+k).value));if(vals.some(x=>!Number.isFinite(x)))throw new Error(`Incomplete ${lab} coordinates`);vstate.points[lab]=[[vals[0],vals[1]],[vals[2],vals[3]]]}vRedraw()}
-async function vPick(e,side){const p=eventToSource(e,vstate[side]);if(!p)return;const idx=side==='left'?0:1;vstate.points[vstate.active][idx]=p;vSyncCoords();vRedraw();if(side==='left'&&$('#vAutoMatch').checked){try{const sid=await vSyncSession();const lf=Math.trunc(+$('#vLeftRef').value),rf=Math.trunc(+$('#vRightRef').value);vstatus(`Matching ${vstate.active} on right reference frame…`);const m=await api('/api/video/match',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({session_id:sid,left_frame:lf,right_frame:rf,x:p[0],y:p[1]})});vstate.points[vstate.active][1]=[m.x,m.y];vSyncCoords();vRedraw();vstatus(`${vstate.active}: right (${m.x}, ${m.y}), SQDIFF ${Number(m.sqdiff).toPrecision(5)}`)}catch(err){vstatus(err.message,true)}}}
-function vGoproPreset(){vstate.points={A:[[466,757],[455,767]],B:[[1286,823],[1271,832]]};$('#vLeftProfile').value=GOPRO_L;$('#vRightProfile').value=GOPRO_R;vSyncCoords();vRedraw();refreshVideoProfileInfo();vstatus('GoPro calibrated profiles and current test A/B preset loaded.')}
+function vUpdateReferenceCursor(){
+  const picking=['A','B'].includes(vstate.active);
+  for(const id of ['#vLeftCanvas','#vRightCanvas'])$(id)?.classList.toggle('pointPick',picking);
+}
+function vSetNavigate(){vstate.active=null;const n=document.querySelector('input[name=vPickPoint][value=navigate]');if(n)n.checked=true;vUpdateReferenceCursor()}
+async function vPick(e,side){
+  if(!['A','B'].includes(vstate.active))return;const p=eventToSource(e,vstate[side]);if(!p)return;const lab=vstate.active,idx=side==='left'?0:1;vstate.points[lab][idx]=p;vSyncCoords();vRedraw();vSetNavigate();
+  if(side==='left'&&$('#vAutoMatch').checked){try{const sid=await vSyncSession(),lf=Math.trunc(+$('#vLeftRef').value),rf=Math.trunc(+$('#vRightRef').value);vstatus(`Matching ${lab} on right reference frame…`);const m=await api('/api/video/match',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({session_id:sid,left_frame:lf,right_frame:rf,x:p[0],y:p[1]})});vstate.points[lab][1]=[m.x,m.y];vSyncCoords();vRedraw();vstatus(`${lab}: right (${m.x}, ${m.y}), SQDIFF ${Number(m.sqdiff).toPrecision(5)} · Navigate mode restored.`)}catch(err){vstatus(err.message,true)}}
+}
+function vFitReferenceViews(){for(const side of ['left','right']){vstate[side].view={zoom:1,centerX:.5,centerY:.5}}vRedraw()}
+function vOneToOneViews(){for(const side of ['left','right']){const s=vstate[side],c=$(side==='left'?'#vLeftCanvas':'#vRightCanvas');if(!s.bitmap)continue;const r=c.getBoundingClientRect(),fit=Math.min(r.width/s.bitmap.width,r.height/s.bitmap.height);s.view.zoom=Math.max(1,1/Math.max(fit,1e-9))}vRedraw()}
+function vReferenceWheel(e,side){e.preventDefault();const v=vstate[side].view;v.zoom=Math.max(1,Math.min(32,v.zoom*(e.deltaY<0?1.2:1/1.2)));vDrawSide(side)}
+function vReferencePointerDown(e,side){
+  if(['A','B'].includes(vstate.active)){vPick(e,side);return}
+  const s=vstate[side];if(!s.bitmap)return;vstate.navDrag={side,x:e.clientX,y:e.clientY,cx:s.view.centerX,cy:s.view.centerY,scale:s.transform?.scale||1};e.currentTarget.setPointerCapture?.(e.pointerId)
+}
+function vReferencePointerMove(e,side){const d=vstate.navDrag,s=vstate[side];if(!d||d.side!==side||!s.bitmap)return;s.view.centerX=d.cx-(e.clientX-d.x)/(d.scale*s.bitmap.width);s.view.centerY=d.cy-(e.clientY-d.y)/(d.scale*s.bitmap.height);vClampView(side);vDrawSide(side)}
+function vReferencePointerUp(){vstate.navDrag=null}
+function vGoproPreset(){$('#vLeftProfile').value=GOPRO_L;$('#vRightProfile').value=GOPRO_R;vSyncCoords();vRedraw();refreshVideoProfileInfo();vstatus('GoPro calibrated L/R profiles selected. Existing A/B preserved. A/B are capture-specific: choose them from this video reference pair; the still-test coordinates are never copied into video.')}
 function vEm10Preset(){$('#vLeftProfile').value=KINO_EM10;$('#vRightProfile').value=KINO_EM10;refreshVideoProfileInfo();vstatus('180Kino EM10 camera/lens profiles selected. Choose A/B from your synchronized reference frames.')}
 
 function vTutorialPreset(){
@@ -289,15 +326,16 @@ function vTutorialPreset(){
   $('#vLeftStart').value=180;$('#vLeftEnd').value=480;
   $('#vRightStart').value=186;$('#vRightEnd').value=486;
   $('#vLeftProfile').value='DJI Action2';$('#vRightProfile').value='DJI Action2';
-  $('#vOutputWidth').value='8192';$('#vCodec').value='hevc';$('#vFpsMode').value='kino';$('#vOutputName').value='VROut.mp4';
+  $('#vOutputWidth').value='8192';$('#vCodec').value='hevc';$('#vFpsMode').value='kino';$('#vLengthPolicy').value='strict';$('#vOutputName').value='VROut.mp4';
   vstate.points={A:[[1152,1272],[1202,1293]],B:[[3180,1492],[3227,1522]]};
   vSyncCoords();vRedraw();refreshVideoProfileInfo();
   vstatus('180Kino tutorial preset loaded: L180/R186, DJI Action2, tutorial A/B and conversion ranges.');
   if(vstate.left.bitmap&&vstate.right.bitmap)setTimeout(()=>refreshProjectedOverlay(true),0);
 }
-function vUseSyncLength(){if(!vstate.leftInfo||!vstate.rightInfo){vstatus('Upload / inspect the pair first.',true);return}const ls=Math.max(0,Math.trunc(+$('#vLeftStart').value)),rs=Math.max(0,Math.trunc(+$('#vRightStart').value));const n=Math.min(vstate.leftInfo.frame_count-ls,vstate.rightInfo.frame_count-rs);if(n<=0){vstatus('Start frame is outside a movie.',true);return}$('#vLeftEnd').value=ls+n-1;$('#vRightEnd').value=rs+n-1;vstatus(`Synchronized range set to ${n} frame pairs.`)}
+function vUseSyncLength(){if(!vstate.leftInfo||!vstate.rightInfo){vstatus('Upload / inspect the pair first.',true);return}const ls=Math.max(0,Math.trunc(+$('#vLeftStart').value)),rs=Math.max(0,Math.trunc(+$('#vRightStart').value));const n=Math.min(vstate.leftInfo.frame_count-ls,vstate.rightInfo.frame_count-rs);if(n<=0){vstatus('Start frame is outside a movie.',true);return}$('#vLeftEnd').value=ls+n-1;$('#vRightEnd').value=rs+n-1;$('#vLengthPolicy').value='trim';vstatus(`Trimmed to shorter remaining length: ${n} frame pairs. No frames are added.`)}
+function vUseExtendedLength(){if(!vstate.leftInfo||!vstate.rightInfo){vstatus('Upload / inspect the pair first.',true);return}const ls=Math.max(0,Math.trunc(+$('#vLeftStart').value)),rs=Math.max(0,Math.trunc(+$('#vRightStart').value));if(ls>=vstate.leftInfo.frame_count||rs>=vstate.rightInfo.frame_count){vstatus('Start frame is outside a movie.',true);return}$('#vLeftEnd').value=vstate.leftInfo.frame_count-1;$('#vRightEnd').value=vstate.rightInfo.frame_count-1;$('#vLengthPolicy').value='repeat_last';const lc=vstate.leftInfo.frame_count-ls,rc=vstate.rightInfo.frame_count-rs;vstatus(`Using all remaining frames: left ${lc}, right ${rc}. Shorter side will repeat its last frame for ${Math.abs(lc-rc)} frame(s).`)}
 function clipRangePayload(){const ls=Math.trunc(+$('#vLeftStart').value),le=Math.trunc(+$('#vLeftEnd').value),rs=Math.trunc(+$('#vRightStart').value),re=Math.trunc(+$('#vRightEnd').value);if([ls,le,rs,re].some(x=>!Number.isInteger(x)||x<0))throw new Error('Frame ranges must be non-negative integers');if(le<ls||re<rs)throw new Error('End frame must be >= start frame');return {left_start:ls,left_end:le,right_start:rs,right_end:re}}
-function videoRangePayload(){const r=clipRangePayload(),lc=r.left_end-r.left_start+1,rc=r.right_end-r.right_start+1;if(lc!==rc)throw new Error(`Video conversion needs equal frame counts (left ${lc}, right ${rc}). JPEG clipping may use different counts.`);return r}
+function videoRangePayload(){const r=clipRangePayload(),lc=r.left_end-r.left_start+1,rc=r.right_end-r.right_start+1,policy=$('#vLengthPolicy').value||'strict';if(policy==='strict'&&lc!==rc)throw new Error(`Selected ranges differ (left ${lc}, right ${rc}). Choose Trim or an Extend mode.`);return {...r,length_policy:policy}}
 async function vRender(){
   try{setVBusy(true);vprogress(.01);vReadCoords();const sid=await vSyncSession();const range=videoRangePayload();const payload={session_id:sid,left_profile:$('#vLeftProfile').value,right_profile:$('#vRightProfile').value,points:vstate.points,...range,output_width:Math.trunc(+$('#vOutputWidth').value),roll:+$('#vRoll').value||0,pitch:+$('#vPitch').value||0,yaw:+$('#vYaw').value||0,right_shift_x_deg:+$('#vStereoX').value||0,right_shift_y_deg:+$('#vStereoY').value||0,codec:$('#vCodec').value,fps_mode:$('#vFpsMode').value,sampling:$('#vSampling').value,output_name:$('#vOutputName').value||'VROut.mp4'};vstatus('Queueing video conversion…');const q=await api('/api/video/render',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});const j=await pollJob(q.job_id,vprogress,vstatus);await loadVideoResult(j.result_url,`/api/jobs/${q.job_id}/preview`,j.result);setVBusy(false);if($('#vDeleteInputs').checked)vDeleteSession();
   }catch(e){vstatus(e.message,true);setVBusy(false)}
@@ -313,7 +351,7 @@ async function loadVideoResult(resultURL,previewURL,meta){
   vstate.resultFrames=Math.max(0,Math.trunc(meta?.frames||0));vstate.resultFps=Number(meta?.fps||0);vstate.checkedFrame=0;
   const video=$('#vResultVideo');video.pause();video.src=previewURL;video.load();$('#vDownloadBtn').disabled=false;
   const fullMB=(Number(meta?.result_bytes||0)/1024/1024).toFixed(2),previewMB=(Number(meta?.preview_bytes||0)/1024/1024).toFixed(2);
-  $('#vResultMeta').textContent=`${meta?.width??'?'} × ${meta?.height??'?'} · ${meta?.frames??'?'} frames · ${Number(meta?.fps||0).toFixed(3)} fps (${meta?.fps_mode||'source'}) · codec ${meta?.codec||'?'} · full ${fullMB} MB · preview ${previewMB} MB · audio: no`;
+  $('#vResultMeta').textContent=`${meta?.width??'?'} × ${meta?.height??'?'} · ${meta?.frames??'?'} frames · ${Number(meta?.fps||0).toFixed(3)} fps (${meta?.fps_mode||'source'}) · length ${meta?.length_policy||'strict'} [L ${meta?.left_frames??'?'} / R ${meta?.right_frames??'?'}] · codec ${meta?.codec||'?'} · full ${fullMB} MB · preview ${previewMB} MB · audio: no`;
   setupOutputFrameChecker();vprogress(1);
   if(meta?.preview_error)vstatus(`Render complete, but optimized preview failed: ${meta.preview_error}`,true);else vstatus('Video conversion complete. Player and frame inspector are ready.');
 }
@@ -337,8 +375,8 @@ function bind(){
   $('#format').onchange=()=>{$('#jpegBox').style.display=$('#format').value==='jpeg'?'flex':'none';const n=$('#outputName');if($('#format').value==='png'&&/\.jpe?g$/i.test(n.value))n.value=n.value.replace(/\.jpe?g$/i,'.png');if($('#format').value==='jpeg'&&/\.png$/i.test(n.value))n.value=n.value.replace(/\.png$/i,'.jpg')};
   $('#overlayAlpha').oninput=drawOverlay;$('#overlayMode').onchange=drawOverlay;$('#overlayDx').oninput=drawOverlay;$('#overlayDy').oninput=drawOverlay;$('#overlayRefresh').onclick=()=>refreshProjectedOverlay(false);$('#overlayAuto').onclick=()=>useProjectedAuto(false);$('#overlayApply').onclick=()=>applyProjectedCandidate(false);$('#overlayReset').onclick=()=>{$('#overlayDx').value=0;$('#overlayDy').value=0;drawOverlay()};
 
-  $('#vOpenLeft').onclick=()=>$('#vLeftFile').click();$('#vOpenRight').onclick=()=>$('#vRightFile').click();$('#vLeftFile').onchange=e=>e.target.files[0]&&vFileChosen(e.target.files[0],'left');$('#vRightFile').onchange=e=>e.target.files[0]&&vFileChosen(e.target.files[0],'right');$('#vUploadBtn').onclick=async()=>{try{await vSyncSession();await vLoadRefs()}catch(e){vstatus(e.message,true)}};$('#vLoadRefs').onclick=vLoadRefs;$('#vPrevPair').onclick=()=>vStepReferencePair(-1);$('#vNextPair').onclick=()=>vStepReferencePair(1);$('#vSyncFull').onclick=vUseSyncLength;$('#vClipBtn').onclick=vClip;$('#vClipDownload').onclick=downloadClip;
-  $('#vLeftCanvas').onclick=e=>vPick(e,'left');$('#vRightCanvas').onclick=e=>vPick(e,'right');$$('input[name=vPickPoint]').forEach(x=>x.onchange=()=>{if(x.checked)vstate.active=x.value});$$('.vcoord').forEach(x=>x.onchange=()=>{try{vReadCoords()}catch(e){vstatus(e.message,true)}});$('#vClearPoints').onclick=()=>{vstate.points={A:[null,null],B:[null,null]};vSyncCoords();vRedraw()};$('#vLeftProfile').onchange=refreshVideoProfileInfo;$('#vRightProfile').onchange=refreshVideoProfileInfo;$('#vGoproPreset').onclick=vGoproPreset;$('#vEm10Preset').onclick=vEm10Preset;$('#vTutorialPreset').onclick=vTutorialPreset;$('#vRenderBtn').onclick=vRender;$('#vDownloadBtn').onclick=downloadVideo;$('#vOverlayAlpha').oninput=vDrawOverlay;$('#vOverlayMode').onchange=vDrawOverlay;$('#vOverlayDx').oninput=vDrawOverlay;$('#vOverlayDy').oninput=vDrawOverlay;$('#vOverlayRefresh').onclick=()=>refreshProjectedOverlay(true);$('#vOverlayAuto').onclick=()=>useProjectedAuto(true);$('#vOverlayApply').onclick=()=>applyProjectedCandidate(true);$('#vOverlayReset').onclick=()=>{$('#vOverlayDx').value=0;$('#vOverlayDy').value=0;vDrawOverlay()};
+  $('#vOpenLeft').onclick=()=>$('#vLeftFile').click();$('#vOpenRight').onclick=()=>$('#vRightFile').click();$('#vLeftFile').onchange=e=>e.target.files[0]&&vFileChosen(e.target.files[0],'left');$('#vRightFile').onchange=e=>e.target.files[0]&&vFileChosen(e.target.files[0],'right');$('#vUploadBtn').onclick=async()=>{try{await vSyncSession();await vLoadRefs()}catch(e){vstatus(e.message,true)}};$('#vLoadRefs').onclick=vLoadRefs;$('#vPrevPair').onclick=()=>vStepReferencePair(-1);$('#vNextPair').onclick=()=>vStepReferencePair(1);$('#vSyncFull').onclick=vUseSyncLength;$('#vExtendFull').onclick=vUseExtendedLength;$('#vFitRefs').onclick=vFitReferenceViews;$('#vOneToOne').onclick=vOneToOneViews;$('#vClipBtn').onclick=vClip;$('#vClipDownload').onclick=downloadClip;
+  for(const [side,sel] of [['left','#vLeftCanvas'],['right','#vRightCanvas']]){const c=$(sel);c.onpointerdown=e=>vReferencePointerDown(e,side);c.onpointermove=e=>vReferencePointerMove(e,side);c.onpointerup=c.onpointercancel=vReferencePointerUp;c.onwheel=e=>vReferenceWheel(e,side)}$$('input[name=vPickPoint]').forEach(x=>x.onchange=()=>{if(x.checked){vstate.active=(x.value==='navigate'?null:x.value);vUpdateReferenceCursor()}});vUpdateReferenceCursor();$$('.vcoord').forEach(x=>x.onchange=()=>{try{vReadCoords()}catch(e){vstatus(e.message,true)}});$('#vClearPoints').onclick=()=>{vstate.points={A:[null,null],B:[null,null]};vSyncCoords();vRedraw()};$('#vLeftProfile').onchange=refreshVideoProfileInfo;$('#vRightProfile').onchange=refreshVideoProfileInfo;$('#vGoproPreset').onclick=vGoproPreset;$('#vEm10Preset').onclick=vEm10Preset;$('#vTutorialPreset').onclick=vTutorialPreset;$('#vRenderBtn').onclick=vRender;$('#vDownloadBtn').onclick=downloadVideo;$('#vOverlayAlpha').oninput=vDrawOverlay;$('#vOverlayMode').onchange=vDrawOverlay;$('#vOverlayDx').oninput=vDrawOverlay;$('#vOverlayDy').oninput=vDrawOverlay;$('#vOverlayRefresh').onclick=()=>refreshProjectedOverlay(true);$('#vOverlayAuto').onclick=()=>useProjectedAuto(true);$('#vOverlayApply').onclick=()=>applyProjectedCandidate(true);$('#vOverlayReset').onclick=()=>{$('#vOverlayDx').value=0;$('#vOverlayDy').value=0;vDrawOverlay()};
   bindProjectedDrag($('#overlayCanvas'),false);bindProjectedDrag($('#vOverlayCanvas'),true);
   $('#vCheckPrev').onclick=()=>seekCheckedOutputFrame(vstate.checkedFrame-1);$('#vCheckNext').onclick=()=>seekCheckedOutputFrame(vstate.checkedFrame+1);$('#vCheckSlider').oninput=e=>seekCheckedOutputFrame(e.target.value);$('#vCheckFrame').onchange=e=>seekCheckedOutputFrame(e.target.value);$('#vResumePlayback').onclick=resumeOutputPlayback;$('#vResultVideo').addEventListener('seeked',drawCheckedOutputFrame);$('#vResultVideo').addEventListener('play',()=>$('#vCheckCanvas').classList.add('hidden'));$('#vResultVideo').addEventListener('timeupdate',syncPlaybackFrameUi);
   window.addEventListener('resize',()=>requestAnimationFrame(()=>{redraw();vRedraw()}));

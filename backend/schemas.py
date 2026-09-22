@@ -48,6 +48,7 @@ class VideoRenderRequest(BaseModel):
     codec: str = "auto"
     fps_mode: Literal["kino", "source"] = "kino"
     sampling: Literal["fast", "hq", "native"] = "fast"
+    length_policy: Literal["strict", "trim", "repeat_last", "black"] = "strict"
     right_shift_x_deg: float = 0.0
     right_shift_y_deg: float = 0.0
     output_name: str = "VROut.mp4"

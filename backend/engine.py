@@ -666,6 +666,45 @@ def gopro12_max_lens_mod2_calibrated_profile(side: str,
 
 
 
+def gopro_calibration_compatibility(width:int,height:int)->tuple[bool,str]:
+    """Check whether the image-calibrated GoPro geometry can be transferred safely.
+
+    The current HERO12 + Max Lens Mod 2.0 calibration was measured from a
+    1792x2048 portrait source.  A proportional resize is safe: optical centre,
+    radius and A/B coordinates scale consistently.  A different aspect ratio
+    usually means a different GoPro digital-lens crop/orientation/stabilisation
+    mode, so silently treating it as the still calibration can produce a very
+    different projection.
+    """
+    w=max(1,int(width)); h=max(1,int(height))
+    base=GOPRO_CAL_BASE_W/GOPRO_CAL_BASE_H
+    aspect=w/h
+    rel=abs(aspect/base-1.0)
+    ok=rel <= 0.02
+    if ok:
+        return True, f"GoPro calibration aspect compatible ({w}x{h}); profile is scaled proportionally."
+    rotated=abs(aspect-(1.0/base))/(1.0/base) <= 0.02
+    if rotated:
+        why="frame aspect looks like a 90-degree rotation of the calibration source"
+    else:
+        why=f"frame aspect {aspect:.4f} differs from calibration aspect {base:.4f}"
+    return False, ("GoPro still-image calibration is not geometry-compatible with this video frame: "
+                   +why+". Keep the GoPro lens profile only as a starting point and pick fresh A/B "
+                   "points from this video's synchronized reference frames; a video-specific lens/crop "
+                   "calibration may be required.")
+
+
+def scale_gopro_reference_point(pt,width:int,height:int):
+    """Scale a point from the *specific supplied calibration still pair*.
+
+    This helper exists for regression tests and that exact scene only.  A/B are
+    scene correspondence points, not lens calibration constants, so the video
+    preset must never inject these coordinates into unrelated footage.
+    """
+    return (float(pt[0])*float(width)/GOPRO_CAL_BASE_W,
+            float(pt[1])*float(height)/GOPRO_CAL_BASE_H)
+
+
 def calculate_radius(p:Profile,w:int,h:int)->float:
     if p.radius_mode==0:return min(w,h)/2
     if p.radius_mode==1:return math.hypot(w,h)/2
@@ -1296,6 +1335,11 @@ def make_alignment_overlay_rgb(left_rgb,right_rgb,alpha=0.5,mode="negative",dx=0
         out=R.copy()
         out[:,:,0]=L[:,:,0]  # RGB red from left, cyan from right
         return out
+    if m in ('perceptual fuse','perceptual','fused'):
+        # Best monoscopic proxy of the final stereo result on a normal 2-D
+        # display: the already-projected left/right eyes are fused into one
+        # image after the candidate right-eye correction is applied.
+        return cv2.addWeighted(L,0.5,R,0.5,0.0)
     return cv2.addWeighted(R,1.0-a,L,a,0.0)
 
 
@@ -1572,16 +1616,39 @@ def convert_stereo_video(left_path,right_path,output_path,lp,rp,
                          right_shift_x_deg=0.0,right_shift_y_deg=0.0,
                          parallel_eyes=None,map_block_rows=64,sample_block_rows=64,
                          preview_path=None,preview_width=1280,
+                         length_policy="strict",
                          progress=None,stop_requested=None):
-    """Convert equal-length synchronized frame ranges to SBS VR180.
+    """Convert synchronized frame ranges to SBS VR180.
 
-    Frame ranges are inclusive.  Audio is intentionally omitted, matching the
-    documented 180Kino 2.0 behavior.
+    ``length_policy`` controls what happens when the selected ranges contain a
+    different number of frames:
+
+    * ``strict``      -- reject unequal ranges (old behaviour).
+    * ``trim``        -- render only the shorter number of pairs.
+    * ``repeat_last`` -- extend the shorter side by holding its last real frame.
+    * ``black``       -- extend the shorter side with generated black frames.
+
+    Holding the last frame is usually the least distracting way to cope with a
+    camera that stopped a little early.  It does *not* synchronize two cameras;
+    synchronization is still established by choosing the correct L/R start or
+    reference-frame offset first.
+
+    Frame ranges are zero-based and inclusive.  Audio is intentionally omitted,
+    matching the documented 180Kino 2.0 behaviour.
     """
     ls,le,rs,re=map(int,(left_start,left_end,right_start,right_end))
     lc=le-ls+1; rc=re-rs+1
     if lc<=0 or rc<=0: raise ValueError("End frame must be >= start frame")
-    if lc!=rc: raise ValueError(f"Left/right ranges must contain the same number of frames (left {lc}, right {rc})")
+    policy=str(length_policy or "strict").strip().lower()
+    aliases={"hold":"repeat_last","repeat":"repeat_last","pad":"repeat_last","pad_last":"repeat_last","shorter":"trim"}
+    policy=aliases.get(policy,policy)
+    if policy not in ("strict","trim","repeat_last","black"):
+        raise ValueError("length_policy must be strict, trim, repeat_last, or black")
+    if policy=="strict" and lc!=rc:
+        raise ValueError(f"Left/right ranges must contain the same number of frames (left {lc}, right {rc}); choose trim or an extend policy to continue")
+    total=min(lc,rc) if policy=="trim" else max(lc,rc)
+    if policy=="strict": total=lc
+
     output_width=int(output_width)
     if output_width<128 or output_width%2: raise ValueError("Output width must be an even integer >= 128")
     n=output_width//2
@@ -1594,18 +1661,19 @@ def convert_stereo_video(left_path,right_path,output_path,lp,rp,
         okL,frameL=capL.read(); okR,frameR=capR.read()
         if not okL or frameL is None or not okR or frameR is None:
             raise RuntimeError("Could not read first synchronized frame pair")
+        # Keep immutable templates for generated padding.  Repeat-last simply
+        # leaves frameL/frameR untouched after the selected range ends.
+        blackL=np.zeros_like(frameL); blackR=np.zeros_like(frameR)
         source_fps=float(capL.get(cv2.CAP_PROP_FPS) or 0.0) or float(capR.get(cv2.CAP_PROP_FPS) or 0.0) or 30.0
         if fps is None or float(fps)<=0:
             fps=source_fps
         fps_mode=str(fps_mode or "kino").strip().lower()
         if fps_mode in ("kino","180kino","native","rounded"):
-            # 180Kino passes a rounded FPS to cudacodec::createVideoWriter.
-            # The supplied 60000/1001 input is therefore written as 60 fps.
             fps=float(_round_away_from_zero(fps))
         elif fps_mode not in ("source","preserve","exact"):
             raise ValueError("fps_mode must be 'kino' or 'source'")
-        def mp(done,total,stage):
-            if progress: progress(0,lc,stage,0.10*(done/max(1,total)))
+        def mp(done,count,stage):
+            if progress: progress(0,total,stage,0.10*(done/max(1,count)))
         map_dtype=np.float64 if str(sampling).lower() in ("native","exact") else np.float32
         plan=build_video_remap_plan(frameL.shape,frameR.shape,lp,rp,left_a,left_b,right_a,right_b,
                                     n,roll,pitch,yaw,map_block_rows,mp,map_dtype)
@@ -1613,9 +1681,6 @@ def convert_stereo_video(left_path,right_path,output_path,lp,rp,
         Path(output_path).parent.mkdir(parents=True,exist_ok=True)
         writer,used_codec=_open_video_writer(output_path,output_width,n,fps,codec)
         if preview_path:
-            # Generate the UI playback proxy directly from rendered frames.
-            # This is much cheaper than decoding the completed 8K HEVC output
-            # again after conversion.
             try:
                 preview_w=min(max(320,int(preview_width)),output_width);preview_w-=preview_w%2
                 preview_h=max(2,int(round(preview_w*n/output_width)));preview_h-=preview_h%2
@@ -1623,20 +1688,29 @@ def convert_stereo_video(left_path,right_path,output_path,lp,rp,
                 preview_writer=_FfmpegH264PreviewWriter(preview_path,preview_w,preview_h,fps)
             except Exception as e:
                 preview_error=str(e);preview_writer=None
-        # OpenCV remap is itself multi-threaded on many builds.  Only split the
-        # two eyes across Python worker threads when OpenCV reports one thread,
-        # avoiding oversubscription that can make normal builds slower.
         if parallel_eyes is None:
             try: parallel_eyes=(cv2.getNumThreads()<=1)
             except Exception: parallel_eyes=False
         ex=ThreadPoolExecutor(max_workers=2) if parallel_eyes and str(sampling).lower() not in ("native","exact") else None
         try:
-            for i in range(lc):
+            for i in range(total):
                 if stop_requested and stop_requested(): raise InterruptedError("Video conversion cancelled")
                 if i:
-                    okL,frameL=capL.read(); okR,frameR=capR.read()
-                    if not okL or frameL is None or not okR or frameR is None:
-                        raise RuntimeError(f"Input ended at L{ls+i}/R{rs+i}")
+                    # Advance only while a real selected frame still exists on
+                    # that side.  Once exhausted, apply the requested padding.
+                    if i < lc:
+                        okL,nextL=capL.read()
+                        if not okL or nextL is None: raise RuntimeError(f"Input ended at L{ls+i}")
+                        frameL=nextL
+                    elif policy=="black":
+                        frameL=blackL
+                    # repeat_last => deliberately retain the previous frameL
+                    if i < rc:
+                        okR,nextR=capR.read()
+                        if not okR or nextR is None: raise RuntimeError(f"Input ended at R{rs+i}")
+                        frameR=nextR
+                    elif policy=="black":
+                        frameR=blackR
                 out=render_video_frame_with_plan(
                     frameL,frameR,plan,sampling,sample_block_rows,
                     right_shift_x_deg,right_shift_y_deg,ex
@@ -1651,7 +1725,9 @@ def convert_stereo_video(left_path,right_path,output_path,lp,rp,
                         try:preview_writer.release()
                         except Exception:pass
                         preview_writer=None
-                if progress: progress(i+1,lc,f"Rendering L{ls+i} / R{rs+i}",0.10+0.90*((i+1)/lc))
+                ltag=(f"L{ls+i}" if i<lc else ("L hold" if policy=="repeat_last" else "L black"))
+                rtag=(f"R{rs+i}" if i<rc else ("R hold" if policy=="repeat_last" else "R black"))
+                if progress: progress(i+1,total,f"Rendering {ltag} / {rtag}",0.10+0.90*((i+1)/total))
         finally:
             if ex is not None: ex.shutdown(wait=True)
         writer.release(); writer=None
@@ -1661,7 +1737,8 @@ def convert_stereo_video(left_path,right_path,output_path,lp,rp,
             preview_writer=None
         return {"output":os.fspath(output_path),"width":output_width,"height":n,
                 "fps":float(fps),"source_fps":float(source_fps),"fps_mode":fps_mode,
-                "frames":lc,"codec":used_codec,"audio":False,"sampling":sampling,
+                "frames":total,"left_frames":lc,"right_frames":rc,"length_policy":policy,
+                "codec":used_codec,"audio":False,"sampling":sampling,
                 "right_shift_x_deg":float(right_shift_x_deg),"right_shift_y_deg":float(right_shift_y_deg),
                 "parallel_eyes":bool(parallel_eyes),
                 "preview_path":os.fspath(preview_path) if preview_path and Path(preview_path).exists() else None,
@@ -1778,7 +1855,7 @@ def cmd_video(a):
         (a.right_ax,a.right_ay),(a.right_bx,a.right_by),
         a.left_start,a.left_end,a.right_start,a.right_end,
         output_width=a.width,roll=a.roll,pitch=a.pitch,yaw=a.yaw,
-        codec=a.codec,fps=a.fps,fps_mode=a.fps_mode,sampling=a.sampling,progress=cb)
+        codec=a.codec,fps=a.fps,fps_mode=a.fps_mode,sampling=a.sampling,length_policy=a.length_policy,progress=cb)
     print("\n"+json.dumps(result,indent=2))
 
 
@@ -1992,13 +2069,13 @@ def show_information_page(parent):
     if tk is None:
         return
     win=tk.Toplevel(parent)
-    win.title("180pyugen — Information, mechanics and pipelines")
+    win.title("180pyugen — Info")
     win.geometry("1080x780")
     win.minsize(760,520)
     outer=ttk.Frame(win,padding=8); outer.pack(fill="both",expand=True)
     ttk.Label(
         outer,
-        text="180pyugen mechanics / processing reference",
+        text="180pyugen processing reference",
         font=("TkDefaultFont",14,"bold")
     ).pack(anchor="w",pady=(0,6))
     ttk.Label(
@@ -2018,6 +2095,40 @@ def show_information_page(parent):
         txt.insert("1.0",textwrap.dedent(body).strip()+"\n")
         txt.configure(state="disabled")
 
+
+def apply_tk_ui_theme(root, dark=True):
+    """Apply a coherent light/dark ttk palette to an existing Tk hierarchy.
+
+    ttk does not inherit Tk canvas colors from a theme, so callers still update
+    their image canvases explicitly.  The helper intentionally sticks to the
+    built-in ``clam`` theme to avoid external theme packages and to keep the
+    desktop build portable across Linux/Windows installations.
+    """
+    style=ttk.Style(root)
+    try:
+        style.theme_use("clam")
+    except Exception:
+        pass
+    if dark:
+        bg="#1b1d21"; panel="#24272d"; field="#17191d"; fg="#e7e9ed"; muted="#aeb4bf"; accent="#3b82f6"; border="#4b515c"
+    else:
+        bg="#f4f4f4"; panel="#ffffff"; field="#ffffff"; fg="#111111"; muted="#555555"; accent="#202020"; border="#b5b5b5"
+    try: root.configure(bg=bg)
+    except Exception: pass
+    style.configure(".",background=bg,foreground=fg,fieldbackground=field,bordercolor=border,lightcolor=border,darkcolor=border)
+    style.configure("TFrame",background=bg)
+    style.configure("TLabelframe",background=bg,foreground=fg)
+    style.configure("TLabelframe.Label",background=bg,foreground=fg)
+    style.configure("TLabel",background=bg,foreground=fg)
+    style.configure("TButton",background=panel,foreground=fg,bordercolor=border,padding=5)
+    style.map("TButton",background=[("active",accent)],foreground=[("active","#ffffff")])
+    style.configure("TEntry",fieldbackground=field,foreground=fg,insertcolor=fg)
+    style.configure("TCombobox",fieldbackground=field,foreground=fg,background=panel,arrowcolor=fg)
+    style.map("TCombobox",fieldbackground=[("readonly",field)],foreground=[("readonly",fg)])
+    style.configure("TSpinbox",fieldbackground=field,foreground=fg,arrowcolor=fg)
+    style.configure("Horizontal.TProgressbar",background=accent,troughcolor=field)
+    return {"bg":bg,"panel":panel,"field":field,"fg":fg,"muted":muted,"accent":accent,"border":border,"canvas":"#111317" if dark else "#202020"}
+
 class AugenGUI:
     """Small native Tkinter front-end for the reconstructed 180Augen pipeline.
 
@@ -2036,7 +2147,7 @@ class AugenGUI:
         if tk is None or Image is None:
             raise RuntimeError("GUI requires tkinter and Pillow")
         self.root = root
-        self.root.title("180pyugen v27 — Image + Video VR180")
+        self.root.title("180pyugen v35 — Image + Video VR180")
         self.root.geometry("1550x900")
         self.root.minsize(1200, 760)
 
@@ -2054,9 +2165,16 @@ class AugenGUI:
         self.overlay_canvas = None
         self.overlay_tk = None
         self.overlay_alpha_var = tk.DoubleVar(value=0.50)
-        self.overlay_mode_var = tk.StringVar(value="Negative align")
+        self.overlay_mode_var = tk.StringVar(value="Perceptual fuse")
         self.overlay_dx_var = tk.DoubleVar(value=0.0)
         self.overlay_dy_var = tk.DoubleVar(value=0.0)
+        # Stereo Align v30 works in FINAL projected-eye space.  These caches
+        # hold a low-resolution render after the 3-D A/B transform and current
+        # convergence/vertical-trim settings.  Candidate dx/dy therefore map
+        # directly to the same right-eye translation used by the real output.
+        self._overlay_eye_left = None
+        self._overlay_eye_right = None
+        self._overlay_auto_shift = (0.0,0.0,0.0)
         self.stereo_x_var = tk.DoubleVar(value=0.0)
         self.stereo_y_var = tk.DoubleVar(value=0.0)
         self.point_mode = None
@@ -2074,6 +2192,8 @@ class AugenGUI:
         self.yaw_var = tk.DoubleVar(value=0.0)
         self.template_var = tk.IntVar(value=20)
         self.decoder_var = tk.StringVar(value="OpenCV")
+        self.theme_var = tk.StringVar(value="Dark")
+        self.ui_palette = apply_tk_ui_theme(self.root, True)
         self.status_var = tk.StringVar(value="Load left/right images, then set points A and B.")
         self.left_ax_var = tk.StringVar(value="466")
         self.left_ay_var = tk.StringVar(value="757")
@@ -2104,6 +2224,8 @@ class AugenGUI:
         ttk.Entry(top, textvariable=self.right_var).grid(row=1, column=1, sticky="ew", padx=5)
         ttk.Button(top, text="Open…", command=self._open_right).grid(row=1, column=2)
         ttk.Button(top, text="Load images", command=self.load_images).grid(row=0, column=3, rowspan=2, padx=10)
+        ttk.Label(top,text="Theme").grid(row=0,column=4,padx=(12,3),sticky="e")
+        ttk.Combobox(top,textvariable=self.theme_var,values=("Dark","Light"),state="readonly",width=8).grid(row=0,column=5,sticky="w")
 
         settings = ttk.LabelFrame(root, text="Camera / lens settings", padding=8)
         settings.grid(row=1, column=0, sticky="ew", padx=8, pady=(0,8))
@@ -2144,11 +2266,12 @@ class AugenGUI:
         ttk.Entry(settings,textvariable=self.stereo_y_var,width=10).grid(row=5,column=3,sticky="w")
 
         body = ttk.Frame(root, padding=(8,0,8,8))
+        self.preview_body=body
         body.grid(row=2,column=0,sticky="nsew")
         # Native 180Augen shows a large left picking image and a much smaller
         # right reference image.  Use roughly a 3:1 horizontal allocation.
-        body.columnconfigure(0,weight=3,minsize=850)
-        body.columnconfigure(1,weight=1,minsize=280)
+        body.columnconfigure(0,weight=1,minsize=420)
+        body.columnconfigure(1,weight=1,minsize=420)
         body.rowconfigure(0,weight=1)
         self.left_canvas = tk.Canvas(body, background="#202020", highlightthickness=1)
         self.right_canvas = tk.Canvas(body, background="#202020", highlightthickness=1)
@@ -2158,6 +2281,8 @@ class AugenGUI:
         self.right_canvas.bind("<Button-1>", lambda e: self._canvas_click("R",e))
         self.left_canvas.bind("<Configure>", lambda e: self._display("L"))
         self.right_canvas.bind("<Configure>", lambda e: self._display("R"))
+        self.root.after_idle(self._apply_main_ui_options)
+        self.theme_var.trace_add("write",lambda *_:self._apply_main_ui_options())
 
         bottom = ttk.Frame(root, padding=8)
         bottom.grid(row=3,column=0,sticky="ew")
@@ -2169,7 +2294,7 @@ class AugenGUI:
         ttk.Button(bottom,text="Overlay preview…",command=self.open_overlay_preview).grid(row=0,column=4,padx=5)
         ttk.Button(bottom,text="Render VR180",command=self.render).grid(row=0,column=5,padx=5)
         ttk.Button(bottom,text="Video workflow…",command=self.open_video_workflow).grid(row=0,column=6,padx=(12,5))
-        ttk.Button(bottom,text="Info / mechanics…",command=lambda:show_information_page(self.root)).grid(row=0,column=7,padx=(8,5))
+        ttk.Button(bottom,text="Info…",command=lambda:show_information_page(self.root)).grid(row=0,column=7,padx=(8,5))
         ttk.Label(bottom,text="Output:").grid(row=1,column=0,sticky="w",pady=(8,0))
         ttk.Entry(bottom,textvariable=self.output_var).grid(row=1,column=1,columnspan=3,sticky="ew",pady=(8,0),padx=5)
         ttk.Button(bottom,text="Save as…",command=self._save_as).grid(row=1,column=4,pady=(8,0))
@@ -2184,6 +2309,21 @@ class AugenGUI:
         for i,row in enumerate(vars_by_row,1):
             ttk.Label(pts,text=row[0]).grid(row=i,column=0)
             for j,v in enumerate(row[1:],1): ttk.Entry(pts,textvariable=v,width=8).grid(row=i,column=j,padx=2)
+
+    def _apply_main_ui_options(self):
+        """Switch desktop palette and preview allocation without rebuilding UI."""
+        dark=self.theme_var.get().lower().startswith("dark")
+        self.ui_palette=apply_tk_ui_theme(self.root,dark)
+        canvas_bg=self.ui_palette["canvas"]
+        for c in (getattr(self,"left_canvas",None),getattr(self,"right_canvas",None)):
+            if c is not None:
+                try:c.configure(bg=canvas_bg,highlightbackground=self.ui_palette["border"])
+                except Exception:pass
+        body=getattr(self,"preview_body",None)
+        if body is not None:
+            body.columnconfigure(0,weight=1,minsize=420)
+            body.columnconfigure(1,weight=1,minsize=420)
+        self._display("L");self._display("R")
 
     def _load_if_present(self):
         if self.left_var.get() and self.right_var.get() and os.path.exists(self.left_var.get()) and os.path.exists(self.right_var.get()):
@@ -2420,21 +2560,74 @@ class AugenGUI:
             self.status_var.set(f"{side} profile: radius={p.radius:.2f}, axis=({p.optical_axis_x:.2f},{p.optical_axis_y:.2f}), projection={p.projection.mode}, k={p.projection.k:.4f}")
         except Exception as e:self.status_var.set(str(e))
 
-    def _overlay_auto_offset(self,which="A"):
-        pairs=[]
-        if str(which).lower() in ("average","avg","both"):
-            labels=("A","B")
-        else:
-            labels=(str(which).upper(),)
-        for lab in labels:
-            lp,rp=self.points.get(lab,(None,None))
-            if lp is not None and rp is not None:
-                pairs.append((lp,rp))
-        if not pairs:
-            return
-        self.overlay_dx_var.set(sum(lp[0]-rp[0] for lp,rp in pairs)/len(pairs))
-        self.overlay_dy_var.set(sum(lp[1]-rp[1] for lp,rp in pairs)/len(pairs))
+    def _prepare_projected_overlay(self):
+        """Render a small copy of the ACTUAL final stereo-eye geometry.
+
+        Earlier overlay versions compared the two raw fisheye source images.
+        That was useful for seeing camera displacement, but a raw-pixel shift is
+        not the shift applied to the final VR180 eye.  v30 instead renders the
+        current calibrated/3-D-aligned stereo pair at 384 pixels per eye,
+        including current convergence and vertical trim.  The candidate offset
+        shown in the right-hand panel is therefore expressed in the final
+        equirectangular eye coordinate system.
+        """
+        if self.left_img is None or self.right_img is None:
+            raise ValueError("Load both images first")
+        v=self._read_vars()
+        lp=self._profile_for("L"); rp=self._profile_for("R")
+        L=cv2.cvtColor(self.left_img,cv2.COLOR_RGB2BGR)
+        R=cv2.cvtColor(self.right_img,cv2.COLOR_RGB2BGR)
+        n=384
+        out=render_stereo_exe_geometry(
+            L,R,lp,rp,v["A"][0],v["B"][0],v["A"][1],v["B"][1],n,
+            float(self.roll_var.get()),float(self.pitch_var.get()),float(self.yaw_var.get()))
+        out=apply_right_eye_trim_sbs(out,float(self.stereo_x_var.get()),float(self.stereo_y_var.get()))
+        rgb=cv2.cvtColor(out,cv2.COLOR_BGR2RGB)
+        self._overlay_eye_left=rgb[:,:n].copy(); self._overlay_eye_right=rgb[:,n:].copy()
+        self._overlay_auto_shift=self._estimate_projected_overlay_shift(
+            self._overlay_eye_left,self._overlay_eye_right)
+        # The right half is explicitly an "aligned candidate", so initialize it
+        # with the measured projected-eye residual rather than duplicating the
+        # uncorrected current view.  Reset candidate still returns to 0/0.
+        self.overlay_dx_var.set(self._overlay_auto_shift[0])
+        self.overlay_dy_var.set(self._overlay_auto_shift[1])
         self._refresh_overlay_preview()
+
+    @staticmethod
+    def _estimate_projected_overlay_shift(left_rgb,right_rgb):
+        """Estimate a global candidate translation in projected-eye pixels.
+
+        Phase correlation is run on Laplacian edge images.  Stereo parallax is
+        depth-dependent, so this is only an initial global suggestion; the
+        manual drag/nudge remains authoritative.
+        """
+        L=cv2.cvtColor(left_rgb,cv2.COLOR_RGB2GRAY).astype(np.float32)
+        R=cv2.cvtColor(right_rgb,cv2.COLOR_RGB2GRAY).astype(np.float32)
+        L=cv2.Laplacian(L,cv2.CV_32F); R=cv2.Laplacian(R,cv2.CV_32F)
+        h,w=L.shape
+        win=cv2.createHanningWindow((w,h),cv2.CV_32F)
+        (dx,dy),response=cv2.phaseCorrelate(R,L,win)
+        limx=w*.25; limy=h*.25
+        dx=float(np.clip(dx,-limx,limx)); dy=float(np.clip(dy,-limy,limy))
+        return dx,dy,float(response)
+
+    def _overlay_use_auto(self):
+        dx,dy,response=self._overlay_auto_shift
+        self.overlay_dx_var.set(dx); self.overlay_dy_var.set(dy)
+        self.status_var.set(f"Projected auto-alignment candidate for fused preview: X {dx:.3f}px, Y {dy:.3f}px (response {response:.3f}).")
+        self._refresh_overlay_preview()
+
+    def _overlay_apply_to_output(self):
+        """Commit the candidate preview shift to final stereo trim controls."""
+        if self._overlay_eye_left is None:return
+        n=float(self._overlay_eye_left.shape[1])
+        dx=float(self.overlay_dx_var.get());dy=float(self.overlay_dy_var.get())
+        self.stereo_x_var.set(float(self.stereo_x_var.get())+dx*180.0/n)
+        self.stereo_y_var.set(float(self.stereo_y_var.get())+dy*180.0/n)
+        self.status_var.set(
+            f"Applied projected candidate to output: convergence {self.stereo_x_var.get():.4f}°, "
+            f"vertical {self.stereo_y_var.get():.4f}°. The right panel now matches the real render setting.")
+        self._prepare_projected_overlay()
 
     def _overlay_nudge(self,dx,dy):
         self.overlay_dx_var.set(float(self.overlay_dx_var.get())+float(dx))
@@ -2447,60 +2640,63 @@ class AugenGUI:
     def _overlay_drag_motion(self,e):
         st=getattr(self,'_overlay_drag_state',None); sc=float(getattr(self,'_overlay_view_scale',1.0) or 1.0)
         if not st:return
-        self.overlay_dx_var.set(st[2]+(e.x-st[0])/sc); self.overlay_dy_var.set(st[3]+(e.y-st[1])/sc)
+        self.overlay_dx_var.set(st[2]+(e.x-st[0])/sc)
+        self.overlay_dy_var.set(st[3]+(e.y-st[1])/sc)
 
     def open_overlay_preview(self):
         if self.left_img is None or self.right_img is None:
-            messagebox.showwarning("Overlay preview", "Load both images first.")
-            return
+            messagebox.showwarning("Stereo Align", "Load both images first."); return
         if self.overlay_window is None or not self.overlay_window.winfo_exists():
-            win=tk.Toplevel(self.root); win.title("Stereo Align preview — left/right registration"); win.geometry("1250x820"); win.minsize(760,520)
-            box=ttk.Frame(win,padding=8); box.pack(fill="both",expand=True)
-            controls=ttk.Frame(box); controls.pack(fill="x")
+            win=tk.Toplevel(self.root);win.title("Stereo Align — current vs aligned final-eye preview");win.geometry("1450x780");win.minsize(900,520)
+            box=ttk.Frame(win,padding=8);box.pack(fill="both",expand=True)
+            controls=ttk.Frame(box);controls.pack(fill="x")
             ttk.Label(controls,text="View").pack(side="left")
-            ttk.Combobox(controls,textvariable=self.overlay_mode_var,values=("Negative align","Alpha blend","Difference","Red/Cyan anaglyph"),state="readonly",width=18).pack(side="left",padx=5)
-            ttk.Label(controls,text="Left opacity").pack(side="left",padx=(8,0))
-            ttk.Scale(controls,from_=0.0,to=1.0,variable=self.overlay_alpha_var,orient="horizontal",command=lambda *_: self._refresh_overlay_preview(),length=150).pack(side="left",padx=5)
-            ttk.Label(controls,text="Right shift X/Y px").pack(side="left",padx=(8,0))
-            ttk.Spinbox(controls,from_=-10000,to=10000,increment=0.1,textvariable=self.overlay_dx_var,width=8,command=self._refresh_overlay_preview).pack(side="left")
-            ttk.Spinbox(controls,from_=-10000,to=10000,increment=0.1,textvariable=self.overlay_dy_var,width=8,command=self._refresh_overlay_preview).pack(side="left")
-            for label,cmd in (("Align A",lambda:self._overlay_auto_offset("A")),("Align B",lambda:self._overlay_auto_offset("B")),("Average",lambda:self._overlay_auto_offset("average")),("Reset",lambda:(self.overlay_dx_var.set(0),self.overlay_dy_var.set(0),self._refresh_overlay_preview()))):
-                ttk.Button(controls,text=label,command=cmd).pack(side="left",padx=2)
-            nudges=ttk.Frame(box); nudges.pack(fill="x",pady=(5,0))
-            ttk.Label(nudges,text="Nudge right view:").pack(side="left")
-            for label,dx,dy in (("←",-1,0),("→",1,0),("↑",0,-1),("↓",0,1),("←0.1",-.1,0),("→0.1",.1,0)):
+            ttk.Combobox(controls,textvariable=self.overlay_mode_var,values=("Perceptual fuse","Negative align","Alpha blend","Difference","Red/Cyan anaglyph"),state="readonly",width=18).pack(side="left",padx=5)
+            ttk.Label(controls,text="Opacity").pack(side="left",padx=(8,0))
+            ttk.Scale(controls,from_=0,to=1,variable=self.overlay_alpha_var,orient="horizontal",length=130,command=lambda *_:self._refresh_overlay_preview()).pack(side="left",padx=5)
+            ttk.Label(controls,text="Candidate right-eye X/Y px").pack(side="left",padx=(8,0))
+            ttk.Spinbox(controls,from_=-500,to=500,increment=.1,textvariable=self.overlay_dx_var,width=8).pack(side="left")
+            ttk.Spinbox(controls,from_=-500,to=500,increment=.1,textvariable=self.overlay_dy_var,width=8).pack(side="left")
+            ttk.Button(controls,text="Auto projected",command=self._overlay_use_auto).pack(side="left",padx=3)
+            ttk.Button(controls,text="Apply to output",command=self._overlay_apply_to_output).pack(side="left",padx=3)
+            ttk.Button(controls,text="Refresh projected view",command=self._prepare_projected_overlay).pack(side="left",padx=3)
+            ttk.Button(controls,text="Reset candidate",command=lambda:(self.overlay_dx_var.set(0),self.overlay_dy_var.set(0),self._refresh_overlay_preview())).pack(side="left",padx=3)
+            nudges=ttk.Frame(box);nudges.pack(fill="x",pady=(5,0))
+            ttk.Label(nudges,text="Nudge candidate:").pack(side="left")
+            for label,dx,dy in (("←",-1,0),("→",1,0),("↑",0,-1),("↓",0,1),("←0.1",-.1,0),("→0.1",.1,0),("↑0.1",0,-.1),("↓0.1",0,.1)):
                 ttk.Button(nudges,text=label,command=lambda dx=dx,dy=dy:self._overlay_nudge(dx,dy),width=5).pack(side="left",padx=1)
-            ttk.Label(nudges,text="Negative align is the BorisFX-style diagnostic: aligned detail tends toward flat gray. Preview shift is diagnostic only; final convergence trim is set in the main window in degrees.").pack(side="left",padx=(10,0))
-            self.overlay_canvas=tk.Canvas(box,bg="#202020",highlightthickness=1); self.overlay_canvas.pack(fill="both",expand=True,pady=(8,0))
-            self.overlay_canvas.bind("<Configure>",lambda e:self._refresh_overlay_preview())
-            self.overlay_canvas.bind("<ButtonPress-1>",self._overlay_drag_start)
-            self.overlay_canvas.bind("<B1-Motion>",self._overlay_drag_motion)
+            ttk.Label(nudges,text="LEFT = current fused final-view proxy. RIGHT = aligned candidate fused proxy. Apply to output writes the exact candidate into the final stereo render.").pack(side="left",padx=(10,0))
+            self.overlay_canvas=tk.Canvas(box,bg="#111317",highlightthickness=1);self.overlay_canvas.pack(fill="both",expand=True,pady=(8,0))
+            self.overlay_canvas.bind("<Configure>",lambda e:self._refresh_overlay_preview());self.overlay_canvas.bind("<ButtonPress-1>",self._overlay_drag_start);self.overlay_canvas.bind("<B1-Motion>",self._overlay_drag_motion)
             self.overlay_window=win
-            self.overlay_mode_var.trace_add("write",lambda *_:self._refresh_overlay_preview())
-            self.overlay_dx_var.trace_add("write",lambda *_:self._refresh_overlay_preview())
-            self.overlay_dy_var.trace_add("write",lambda *_:self._refresh_overlay_preview())
+            self.overlay_mode_var.trace_add("write",lambda *_:self._refresh_overlay_preview());self.overlay_dx_var.trace_add("write",lambda *_:self._refresh_overlay_preview());self.overlay_dy_var.trace_add("write",lambda *_:self._refresh_overlay_preview())
         else:
-            self.overlay_window.deiconify(); self.overlay_window.lift()
-        self._refresh_overlay_preview()
+            self.overlay_window.deiconify();self.overlay_window.lift()
+        try:self._prepare_projected_overlay()
+        except Exception as e:messagebox.showerror("Stereo Align",str(e),parent=self.overlay_window)
 
     def _refresh_overlay_preview(self):
-        win=getattr(self,'overlay_window',None); canvas=getattr(self,'overlay_canvas',None)
-        if win is None or canvas is None or not win.winfo_exists(): return
-        if self.left_img is None or self.right_img is None: canvas.delete("all"); return
-        cw=max(1,canvas.winfo_width()); ch=max(1,canvas.winfo_height())
-        if cw<10 or ch<10:return
-        mode=self.overlay_mode_var.get().lower()
-        view=make_alignment_overlay_rgb(self.left_img,self.right_img,self.overlay_alpha_var.get(),mode,self.overlay_dx_var.get(),self.overlay_dy_var.get())
-        bh,bw=view.shape[:2]; sc=min((cw-8)/bw,(ch-8)/bh); self._overlay_view_scale=sc; nw=max(1,round(bw*sc)); nh=max(1,round(bh*sc)); ox=(cw-nw)//2; oy=(ch-nh)//2
-        pil=Image.fromarray(view).resize((nw,nh),Image.Resampling.LANCZOS); tkimg=ImageTk.PhotoImage(pil)
-        canvas.delete("all"); canvas.create_image(ox,oy,anchor="nw",image=tkimg); self.overlay_tk=tkimg
-        dx=float(self.overlay_dx_var.get()); dy=float(self.overlay_dy_var.get())
-        for lab,color in (("A","#00ff7f"),("B","#00cfff")):
-            lp,rp=self.points.get(lab,(None,None))
-            if lp is not None:
-                x=ox+(lp[0]/bw)*nw; y=oy+(lp[1]/bh)*nh; canvas.create_oval(x-6,y-6,x+6,y+6,outline="#ff4d6d",width=2); canvas.create_text(x+8,y-8,text=f"L{lab}",fill="#ff9db0",anchor="sw")
-            if rp is not None:
-                x=ox+((rp[0]+dx)/bw)*nw; y=oy+((rp[1]+dy)/bh)*nh; canvas.create_rectangle(x-6,y-6,x+6,y+6,outline=color,width=2); canvas.create_text(x+8,y+8,text=f"R{lab}",fill=color,anchor="nw")
+        canvas=getattr(self,'overlay_canvas',None)
+        if canvas is None or self.overlay_window is None or not self.overlay_window.winfo_exists():return
+        L=self._overlay_eye_left;R=self._overlay_eye_right
+        if L is None or R is None:
+            canvas.delete("all")
+            canvas.create_text(max(1,canvas.winfo_width())//2,max(1,canvas.winfo_height())//2,
+                               text="Preparing projected alignment preview…",fill="#9aa6b2",
+                               font=("TkDefaultFont",12,"bold"))
+            return
+        cw=max(1,canvas.winfo_width());ch=max(1,canvas.winfo_height());mode=self.overlay_mode_var.get()
+        current=make_alignment_overlay_rgb(L,R,self.overlay_alpha_var.get(),mode,0,0)
+        candidate=make_alignment_overlay_rgb(L,R,self.overlay_alpha_var.get(),mode,self.overlay_dx_var.get(),self.overlay_dy_var.get())
+        h,w=current.shape[:2];gap=6
+        combo=np.zeros((h,w*2+gap,3),dtype=np.uint8);combo[:,:w]=current;combo[:,w+gap:]=candidate
+        sc=min((cw-8)/combo.shape[1],(ch-30)/h);self._overlay_view_scale=sc
+        nw=max(1,round(combo.shape[1]*sc));nh=max(1,round(h*sc));ox=(cw-nw)//2;oy=max(24,(ch-nh)//2)
+        im=Image.fromarray(combo).resize((nw,nh),Image.Resampling.LANCZOS);ph=ImageTk.PhotoImage(im)
+        canvas.delete("all");canvas.create_image(ox,oy,anchor="nw",image=ph);self.overlay_tk=ph
+        canvas.create_text(ox+round(w*sc)/2,8,text="CURRENT FUSED FINAL VIEW",fill="#d8dde6",anchor="n",font=("TkDefaultFont",11,"bold"))
+        canvas.create_text(ox+round((w+gap+w/2)*sc),8,text="ALIGNED FUSED CANDIDATE",fill="#7ee7ff",anchor="n",font=("TkDefaultFont",11,"bold"))
+        divx=ox+round((w+gap/2)*sc);canvas.create_line(divx,oy,divx,oy+nh,fill="#59616e",width=2)
 
     def render(self):
         try:
@@ -2523,7 +2719,7 @@ class AugenGUI:
             out=apply_right_eye_trim_sbs(out,float(self.stereo_x_var.get()),float(self.stereo_y_var.get()))
             path=self.output_var.get() or "LROut.jpg"
             if not write_image(path,out): raise IOError(f"Could not write {path}")
-            self.status_var.set(f"Rendered {path} — {out.shape[1]}×{out.shape[0]} — image workflow v25")
+            self.status_var.set(f"Rendered {path} — {out.shape[1]}×{out.shape[0]} — image workflow v30")
             self._show_preview(out)
         except Exception as e:
             messagebox.showerror("Render failed",str(e)); self.status_var.set(f"Render failed: {e}")
@@ -2544,16 +2740,24 @@ class VideoWorkflow:
     """180Kino-style workflow in a separate window inside 180pyugen."""
 
     def __init__(self,master,profiles):
-        self.win=tk.Toplevel(master); self.win.title("180pyugen v27 — Video workflow (180Kino)")
+        self.win=tk.Toplevel(master); self.win.title("180pyugen v35 — Video workflow (180Kino)")
         self.win.geometry("1500x900"); self.win.minsize(1150,720)
         self.profiles=list(profiles)
         self.left_frame=self.right_frame=None; self.left_tk=self.right_tk=None
         self.video_overlay_window=None; self.video_overlay_canvas=None; self.video_overlay_tk=None
         self.video_overlay_alpha=tk.DoubleVar(value=0.50)
-        self.video_overlay_mode=tk.StringVar(value="Negative align")
+        self.video_overlay_mode=tk.StringVar(value="Perceptual fuse")
         self.video_overlay_dx=tk.DoubleVar(value=0.0)
         self.video_overlay_dy=tk.DoubleVar(value=0.0)
-        self.transforms={"L":None,"R":None}; self.points={"A":[None,None],"B":[None,None]}; self.active="A"
+        self._video_overlay_eye_left=None
+        self._video_overlay_eye_right=None
+        self._video_overlay_auto_shift=(0.0,0.0,0.0)
+        # Reference-frame navigation state is independent for each eye and is
+        # intentionally preserved when Previous/Next pair loads a new frame.
+        # center is normalized source-image position; zoom=1 means fit-to-view.
+        self.view_state={"L":{"zoom":1.0,"center":[0.5,0.5]},"R":{"zoom":1.0,"center":[0.5,0.5]}}
+        self._pan_state=None
+        self.transforms={"L":None,"R":None}; self.points={"A":[None,None],"B":[None,None]}; self.active=None
         self.worker=None; self.cancel_event=threading.Event()
         self.left_video=tk.StringVar(); self.right_video=tk.StringVar()
         self.left_ref=tk.IntVar(value=0); self.right_ref=tk.IntVar(value=0)
@@ -2562,7 +2766,11 @@ class VideoWorkflow:
         self.left_profile=tk.StringVar(value=GOPRO_CAL_L_NAME); self.right_profile=tk.StringVar(value=GOPRO_CAL_R_NAME)
         self.output_width=tk.IntVar(value=4096); self.roll=tk.DoubleVar(value=0.0); self.pitch=tk.DoubleVar(value=0.0); self.yaw=tk.DoubleVar(value=0.0)
         self.output=tk.StringVar(value="VROut.mp4"); self.codec=tk.StringVar(value="auto"); self.sampling=tk.StringVar(value="fast"); self.fps_mode=tk.StringVar(value="kino")
+        self.length_policy=tk.StringVar(value="strict")
         self.stereo_x=tk.DoubleVar(value=0.0); self.stereo_y=tk.DoubleVar(value=0.0)
+        self.theme_var=tk.StringVar(value="Dark")
+        self.last_output_path=None; self.output_check_btn=None
+        self.ui_palette=apply_tk_ui_theme(self.win,True)
         self.status=tk.StringVar(value="Choose left/right movies and load synchronized reference frames.")
         self.progress=tk.DoubleVar(value=0.0)
         self.coord_vars={lab:[tk.StringVar() for _ in range(4)] for lab in ("A","B")}
@@ -2570,11 +2778,11 @@ class VideoWorkflow:
 
     def _build(self):
         w=self.win; w.columnconfigure(0,weight=1); w.rowconfigure(3,weight=1)
-        top=ttk.LabelFrame(w,text="Input movies / synchronization",padding=8); top.grid(row=0,column=0,sticky="ew",padx=8,pady=8)
+        top=ttk.LabelFrame(w,text="Input movies / synchronization",padding=4); top.grid(row=0,column=0,sticky="ew",padx=6,pady=4)
         top.columnconfigure(1,weight=1)
-        ttk.Label(top,text="Left movie").grid(row=0,column=0,sticky="w"); ttk.Entry(top,textvariable=self.left_video).grid(row=0,column=1,sticky="ew",padx=5)
+        ttk.Label(top,text="Left movie").grid(row=0,column=0,sticky="w"); ttk.Entry(top,textvariable=self.left_video).grid(row=0,column=1,sticky="ew",padx=3)
         ttk.Button(top,text="Open…",command=lambda:self._pick_video("L")).grid(row=0,column=2)
-        ttk.Label(top,text="Right movie").grid(row=1,column=0,sticky="w"); ttk.Entry(top,textvariable=self.right_video).grid(row=1,column=1,sticky="ew",padx=5)
+        ttk.Label(top,text="Right movie").grid(row=1,column=0,sticky="w"); ttk.Entry(top,textvariable=self.right_video).grid(row=1,column=1,sticky="ew",padx=3)
         ttk.Button(top,text="Open…",command=lambda:self._pick_video("R")).grid(row=1,column=2)
         ttk.Label(top,text="Reference L").grid(row=0,column=3,padx=(15,4))
         self.left_ref_spin=ttk.Spinbox(top,from_=0,to=10**9,textvariable=self.left_ref,width=10)
@@ -2584,16 +2792,22 @@ class VideoWorkflow:
         self.right_ref_spin.grid(row=1,column=4)
         self.left_ref_spin.bind("<Return>",lambda e:self.load_reference_frames())
         self.right_ref_spin.bind("<Return>",lambda e:self.load_reference_frames())
-        ttk.Button(top,text="Load reference frames",command=self.load_reference_frames).grid(row=0,column=5,rowspan=2,padx=8)
-        ttk.Button(top,text="JPEG clipping tool…",command=self.clip_dialog).grid(row=0,column=6,rowspan=2,padx=8)
-        ttk.Button(top,text="180Kino tutorial preset",command=self.tutorial_preset).grid(row=0,column=7,rowspan=2,padx=8)
-        ttk.Button(top,text="Info / mechanics…",command=lambda:show_information_page(self.win)).grid(row=0,column=8,rowspan=2,padx=8)
+        ttk.Button(top,text="Load refs",command=self.load_reference_frames).grid(row=0,column=5,rowspan=2,padx=3)
+        ttk.Button(top,text="JPEG clip…",command=self.clip_dialog).grid(row=0,column=6,rowspan=2,padx=3)
+        ttk.Button(top,text="Tutorial",command=self.tutorial_preset).grid(row=0,column=7,rowspan=2,padx=3)
+        ttk.Button(top,text="Info…",command=lambda:show_information_page(self.win)).grid(row=0,column=8,rowspan=2,padx=3)
+        ttk.Button(top,text="◀ pair",command=lambda:self._step_reference(-1)).grid(row=0,column=9,padx=2)
+        ttk.Button(top,text="pair ▶",command=lambda:self._step_reference(1)).grid(row=1,column=9,padx=2)
+        ttk.Label(top,text="Theme").grid(row=0,column=10,padx=(5,2)); ttk.Combobox(top,textvariable=self.theme_var,values=("Dark","Light"),state="readonly",width=8).grid(row=0,column=11)
+        ttk.Button(top,text="Fit",command=self._fit_reference_views).grid(row=1,column=10,padx=(5,2))
+        ttk.Button(top,text="1:1",command=self._one_to_one_views).grid(row=1,column=11,padx=2)
 
         settings=ttk.LabelFrame(w,text="Conversion settings",padding=8); settings.grid(row=1,column=0,sticky="ew",padx=8,pady=(0,8))
         for c in range(9): settings.columnconfigure(c,weight=1)
         names=[p.name for p in self.profiles]+[GOPRO_CAL_L_NAME,GOPRO_CAL_R_NAME,"GoPro HERO12 Black + Max Lens Mod 2.0"]
         ttk.Label(settings,text="Left profile").grid(row=0,column=0,sticky="w"); ttk.Combobox(settings,textvariable=self.left_profile,values=names,state="readonly").grid(row=1,column=0,columnspan=2,sticky="ew",padx=(0,8))
         ttk.Label(settings,text="Right profile").grid(row=0,column=2,sticky="w"); ttk.Combobox(settings,textvariable=self.right_profile,values=names,state="readonly").grid(row=1,column=2,columnspan=2,sticky="ew",padx=(0,8))
+        ttk.Button(settings,text="GoPro profiles",command=self.gopro_video_profiles).grid(row=2,column=0,columnspan=2,sticky="w",pady=(4,0))
         ttk.Label(settings,text="Output width").grid(row=0,column=4,sticky="w"); ttk.Combobox(settings,textvariable=self.output_width,values=(2048,4096,6144,8192),width=10).grid(row=1,column=4,sticky="w")
         ttk.Label(settings,text="Sampling").grid(row=0,column=5,sticky="w"); ttk.Combobox(settings,textvariable=self.sampling,values=("fast","hq","native"),state="readonly",width=10).grid(row=1,column=5,sticky="w")
         ttk.Label(settings,text="Codec").grid(row=0,column=6,sticky="w"); ttk.Combobox(settings,textvariable=self.codec,values=("auto","hevc","hevc-nvenc","avc1","mp4v","MJPG"),width=12).grid(row=1,column=6,sticky="w")
@@ -2607,20 +2821,31 @@ class VideoWorkflow:
         ranges=ttk.LabelFrame(w,text="Frame ranges (zero-based, inclusive)",padding=8); ranges.grid(row=2,column=0,sticky="ew",padx=8,pady=(0,8))
         for col,(lab,var) in enumerate((("Left start",self.left_start),("Left end",self.left_end),("Right start",self.right_start),("Right end",self.right_end))):
             ttk.Label(ranges,text=lab).grid(row=0,column=2*col); ttk.Entry(ranges,textvariable=var,width=10).grid(row=0,column=2*col+1)
-        ttk.Button(ranges,text="Use full synchronized length",command=self.use_full_ranges).grid(row=0,column=8,padx=(12,0))
+        ttk.Button(ranges,text="Trim to shorter remaining",command=self.use_full_ranges).grid(row=0,column=8,padx=(12,3))
+        ttk.Button(ranges,text="Use full remaining + extend shorter",command=self.use_extended_ranges).grid(row=0,column=9,padx=3)
+        ttk.Label(ranges,text="Length handling").grid(row=0,column=10,padx=(12,2))
+        ttk.Combobox(ranges,textvariable=self.length_policy,
+                     values=("strict","trim","repeat_last","black"),state="readonly",width=12).grid(row=0,column=11)
 
-        body=ttk.Frame(w,padding=(8,0,8,8)); body.grid(row=3,column=0,sticky="nsew")
-        body.columnconfigure(0,weight=3,minsize=760); body.columnconfigure(1,weight=1,minsize=280); body.rowconfigure(0,weight=1)
-        self.lc=tk.Canvas(body,bg="#202020",highlightthickness=1); self.rc=tk.Canvas(body,bg="#202020",highlightthickness=1)
-        self.lc.grid(row=0,column=0,sticky="nsew",padx=(0,6)); self.rc.grid(row=0,column=1,sticky="nsew",padx=(6,0))
-        self.lc.bind("<Button-1>",lambda e:self._click("L",e)); self.rc.bind("<Button-1>",lambda e:self._click("R",e))
-        self.lc.bind("<Configure>",lambda e:self._display("L")); self.rc.bind("<Configure>",lambda e:self._display("R"))
+        body=ttk.Frame(w,padding=(8,0,8,8)); self.preview_body=body; body.grid(row=3,column=0,sticky="nsew")
+        body.columnconfigure(0,weight=1,minsize=480); body.columnconfigure(1,weight=1,minsize=480); body.rowconfigure(0,weight=0)
+        self.lc=tk.Canvas(body,bg="#202020",highlightthickness=1,height=500,cursor="fleur"); self.rc=tk.Canvas(body,bg="#202020",highlightthickness=1,height=500,cursor="fleur")
+        self.lc.grid(row=0,column=0,sticky="ew",padx=(0,6)); self.rc.grid(row=0,column=1,sticky="ew",padx=(6,0))
+        for side,canvas in (("L",self.lc),("R",self.rc)):
+            canvas.bind("<ButtonPress-1>",lambda e,s=side:self._reference_press(s,e))
+            canvas.bind("<B1-Motion>",lambda e,s=side:self._reference_drag(s,e))
+            canvas.bind("<ButtonRelease-1>",lambda e,s=side:self._reference_release(s,e))
+            canvas.bind("<MouseWheel>",lambda e,s=side:self._reference_wheel(s,e))
+            canvas.bind("<Button-4>",lambda e,s=side:self._reference_wheel(s,e,1))
+            canvas.bind("<Button-5>",lambda e,s=side:self._reference_wheel(s,e,-1))
+            canvas.bind("<Configure>",lambda e,s=side:self._display(s))
+        self.theme_var.trace_add("write",lambda *_:self._apply_video_ui_options()); self.win.after_idle(self._apply_video_ui_options)
 
-        bottom=ttk.Frame(w,padding=8); bottom.grid(row=4,column=0,sticky="ew"); bottom.columnconfigure(5,weight=1)
+        bottom=ttk.Frame(w,padding=4); bottom.grid(row=4,column=0,sticky="ew"); bottom.columnconfigure(5,weight=1)
         ttk.Button(bottom,text="Set A",command=lambda:self._set_active("A")).grid(row=0,column=0,padx=3); ttk.Button(bottom,text="Set B",command=lambda:self._set_active("B")).grid(row=0,column=1,padx=3)
         ttk.Button(bottom,text="Clear A/B",command=self.clear_points).grid(row=0,column=2,padx=3)
         ttk.Button(bottom,text="Overlay preview…",command=self.open_overlay_preview).grid(row=0,column=9,padx=(12,3))
-        pts=ttk.LabelFrame(bottom,text="A/B coordinates",padding=4); pts.grid(row=0,column=3,rowspan=4,padx=8)
+        pts=ttk.LabelFrame(bottom,text="A/B coordinates",padding=2); pts.grid(row=0,column=3,rowspan=4,padx=8)
         for j,h in enumerate(("","L x","L y","R x","R y")): ttk.Label(pts,text=h).grid(row=0,column=j,padx=2)
         for i,lab in enumerate(("A","B"),1):
             ttk.Label(pts,text=lab).grid(row=i,column=0)
@@ -2629,9 +2854,123 @@ class VideoWorkflow:
         ttk.Button(bottom,text="Save as…",command=self._save_as).grid(row=0,column=6,padx=3)
         self.start_btn=ttk.Button(bottom,text="Start video conversion",command=self.start_conversion); self.start_btn.grid(row=0,column=7,padx=(10,3))
         self.cancel_btn=ttk.Button(bottom,text="Cancel",command=self.cancel_conversion,state="disabled"); self.cancel_btn.grid(row=0,column=8,padx=3)
+        self.output_check_btn=ttk.Button(bottom,text="Inspect generated video…",command=self.open_output_frame_checker,state="disabled"); self.output_check_btn.grid(row=0,column=9,padx=(10,3))
         ttk.Progressbar(bottom,variable=self.progress,maximum=100).grid(row=1,column=4,columnspan=5,sticky="ew",pady=(8,0))
         ttk.Label(bottom,textvariable=self.status,anchor="w").grid(row=2,column=4,columnspan=5,sticky="ew",pady=(6,0))
         ttk.Label(bottom,text="Audio is not written in this 180Kino-compatible path.").grid(row=3,column=4,columnspan=5,sticky="w",pady=(4,0))
+
+    def _apply_video_ui_options(self):
+        """Apply the selected palette and keep both reference views equally sized."""
+        dark=self.theme_var.get().lower().startswith("dark")
+        self.ui_palette=apply_tk_ui_theme(self.win,dark)
+        for c in (getattr(self,"lc",None),getattr(self,"rc",None)):
+            if c is not None:
+                try:c.configure(bg=self.ui_palette["canvas"],highlightbackground=self.ui_palette["border"])
+                except Exception:pass
+        body=getattr(self,"preview_body",None)
+        if body is not None:
+            body.columnconfigure(0,weight=1,minsize=480)
+            body.columnconfigure(1,weight=1,minsize=480)
+        self._display("L");self._display("R")
+
+    def _fit_reference_views(self):
+        """Return both reference canvases to fit-to-window without changing frames."""
+        for s in ("L","R"):
+            self.view_state[s]["zoom"]=1.0
+            self.view_state[s]["center"]=[0.5,0.5]
+            self._display(s)
+
+    def _one_to_one_views(self):
+        """Show source pixels at approximately 1 display pixel per source pixel.
+
+        This is intentionally a *zoomed crop* for 4K sources.  The normalized
+        center is preserved, so switching to Previous/Next pair keeps looking
+        at the same timer/LED/detail rather than jumping back to image center.
+        """
+        for s in ("L","R"):
+            frame=self.left_frame if s=="L" else self.right_frame
+            canvas=self.lc if s=="L" else self.rc
+            if frame is None: continue
+            h,w=frame.shape[:2];cw=max(1,canvas.winfo_width());ch=max(1,canvas.winfo_height())
+            fit=min(cw/w,ch/h)
+            self.view_state[s]["zoom"]=max(1.0,1.0/max(fit,1e-9))
+            self._display(s)
+
+    @staticmethod
+    def _clamp_reference_center(cx,cy,w,h,scale,cw,ch):
+        # Clamp the source-space centre just enough to keep the image covering
+        # the canvas at zoom > fit.  At fit scale the natural 0.5 centre wins.
+        if w*scale<=cw: cx=w*0.5
+        else:
+            half=cw/(2*scale); cx=min(w-half,max(half,cx))
+        if h*scale<=ch: cy=h*0.5
+        else:
+            half=ch/(2*scale); cy=min(h-half,max(half,cy))
+        return cx,cy
+
+    def _reference_press(self,side,e):
+        # Point picking is explicitly armed by Set A / Set B and is one-shot.
+        # Normal left-button interaction is therefore always safe for panning.
+        if self.active in ("A","B"):
+            self._click(side,e)
+            self.active=None
+            self._set_reference_cursor(False)
+            self.status.set(self.status.get()+"  Navigation mode restored.")
+            return
+        st=self.view_state[side]
+        self._pan_state=(side,e.x,e.y,float(st["center"][0]),float(st["center"][1]))
+
+    def _reference_drag(self,side,e):
+        st=self._pan_state
+        tr=self.transforms.get(side)
+        if not st or st[0]!=side or not tr:return
+        scale,ox,oy,w,h=tr; dx=e.x-st[1];dy=e.y-st[2]
+        cx=st[3]*w-dx/max(scale,1e-9);cy=st[4]*h-dy/max(scale,1e-9)
+        cw=max(1,(self.lc if side=="L" else self.rc).winfo_width());ch=max(1,(self.lc if side=="L" else self.rc).winfo_height())
+        cx,cy=self._clamp_reference_center(cx,cy,w,h,scale,cw,ch)
+        self.view_state[side]["center"]=[cx/w,cy/h]
+        self._display(side)
+
+    def _reference_release(self,side,e):
+        if self._pan_state and self._pan_state[0]==side:self._pan_state=None
+
+    def _reference_wheel(self,side,e,direction=None):
+        frame=self.left_frame if side=="L" else self.right_frame
+        if frame is None:return "break"
+        step=direction if direction is not None else (1 if getattr(e,"delta",0)>0 else -1)
+        st=self.view_state[side];old=float(st["zoom"]);new=max(1.0,min(32.0,old*(1.20 if step>0 else 1/1.20)))
+        st["zoom"]=new;self._display(side)
+        return "break"
+
+    def _step_reference(self,delta):
+        """Move both synchronized reference indices together and redraw frames."""
+        try:
+            self.left_ref.set(max(0,int(self.left_ref.get())+int(delta)))
+            self.right_ref.set(max(0,int(self.right_ref.get())+int(delta)))
+            if self.left_video.get().strip() and self.right_video.get().strip():
+                self.load_reference_frames()
+        except Exception as e:
+            self.status.set(str(e))
+
+    def gopro_video_profiles(self):
+        """Select GoPro lens profiles without overwriting capture-specific A/B.
+
+        Earlier web builds incorrectly copied the A/B coordinates from the
+        supplied GoPro *still calibration test scene* into every GoPro video.
+        Those points describe scene/camera orientation for that one pair; they
+        are not camera constants.  Reusing them can rotate the right eye by a
+        completely wrong amount and make video output look unrelated to the
+        otherwise-good still conversion.
+        """
+        self.left_profile.set(GOPRO_CAL_L_NAME)
+        self.right_profile.set(GOPRO_CAL_R_NAME)
+        msg="GoPro calibrated L/R profiles selected. Existing A/B preserved; choose fresh A/B from this video's reference frames."
+        frame=self.left_frame if self.left_frame is not None else self.right_frame
+        if frame is not None:
+            ok,warn=gopro_calibration_compatibility(frame.shape[1],frame.shape[0])
+            msg += "  " + warn
+        self.status.set(msg)
+        self._refresh_overlay_preview()
 
     def tutorial_preset(self):
         """Load the settings shown in the supplied 180Kino 2.0 tutorial."""
@@ -2646,7 +2985,7 @@ class VideoWorkflow:
         self.output_width.set(8192)
         self.codec.set("hevc")
         self.fps_mode.set("kino")
-        self.sampling.set("fast")
+        self.sampling.set("fast"); self.length_policy.set("strict")
         self.stereo_x.set(0.0); self.stereo_y.set(0.0)
         self.output.set("VROut.mp4")
         self.points={
@@ -2699,37 +3038,93 @@ class VideoWorkflow:
             messagebox.showerror("Video",str(e),parent=self.win)
 
     def use_full_ranges(self):
+        """Trim both ranges to the shorter remaining movie.
+
+        This does NOT add frames.  It is the old "Use synchronized remaining
+        length" behaviour, renamed to make the truncation explicit.
+        """
         try:
             li=video_probe(self.left_video.get()); ri=video_probe(self.right_video.get())
             ls=max(0,int(self.left_start.get())); rs=max(0,int(self.right_start.get()))
             n=min(li["frame_count"]-ls,ri["frame_count"]-rs)
             if n<=0: raise ValueError("Start frame is outside one of the movies")
-            self.left_end.set(ls+n-1);self.right_end.set(rs+n-1)
-            self.status.set(f"Synchronized range: {n} frame pairs (L{ls}..{ls+n-1}, R{rs}..{rs+n-1})")
+            self.left_end.set(ls+n-1);self.right_end.set(rs+n-1);self.length_policy.set("trim")
+            self.status.set(f"Trimmed to shorter remaining length: {n} frame pairs (L{ls}..{ls+n-1}, R{rs}..{rs+n-1}).")
         except Exception as e: messagebox.showerror("Video",str(e),parent=self.win)
+
+    def use_extended_ranges(self):
+        """Keep every remaining real frame and extend the shorter eye."""
+        try:
+            li=video_probe(self.left_video.get());ri=video_probe(self.right_video.get())
+            ls=max(0,int(self.left_start.get()));rs=max(0,int(self.right_start.get()))
+            if ls>=li["frame_count"] or rs>=ri["frame_count"]:raise ValueError("Start frame is outside one of the movies")
+            self.left_end.set(li["frame_count"]-1);self.right_end.set(ri["frame_count"]-1)
+            self.length_policy.set("repeat_last")
+            lc=li["frame_count"]-ls;rc=ri["frame_count"]-rs
+            self.status.set(f"Full remaining ranges selected: left {lc}, right {rc}. Shorter side will hold its last frame for {abs(lc-rc)} frame(s).")
+        except Exception as e:messagebox.showerror("Video",str(e),parent=self.win)
 
     def load_reference_frames(self):
         try:
             self.left_frame=read_video_frame(self.left_video.get(),self.left_ref.get()); self.right_frame=read_video_frame(self.right_video.get(),self.right_ref.get())
-            self.clear_points(False); self._display("L");self._display("R"); self._refresh_overlay_preview()
-            self.status.set(f"Loaded L{self.left_ref.get()} / R{self.right_ref.get()}. Pick A and B on the large left frame.")
+            # Deliberately preserve A/B and zoom/pan while stepping through the
+            # timeline.  This makes a zoomed timer/LED region usable for visual
+            # synchronization without accidentally destroying calibration.
+            self._display("L");self._display("R"); self._refresh_overlay_preview()
+            msg=f"Loaded L{self.left_ref.get()} / R{self.right_ref.get()}. Drag to pan, wheel to zoom; Set A/B explicitly to edit coordinates."
+            if self.left_profile.get()==GOPRO_CAL_L_NAME or self.right_profile.get()==GOPRO_CAL_R_NAME:
+                okL,wL=gopro_calibration_compatibility(self.left_frame.shape[1],self.left_frame.shape[0])
+                okR,wR=gopro_calibration_compatibility(self.right_frame.shape[1],self.right_frame.shape[0])
+                if not (okL and okR): msg += "  WARNING: " + (wL if not okL else wR)
+            self.status.set(msg)
         except Exception as e: messagebox.showerror("Reference frames",str(e),parent=self.win)
 
     def _display(self,side):
+        """Draw a persistent zoom/pan reference view with in-frame metadata."""
         frame=self.left_frame if side=="L" else self.right_frame; canvas=self.lc if side=="L" else self.rc
         canvas.delete("all")
         if frame is None:return
-        cw=max(1,canvas.winfo_width());ch=max(1,canvas.winfo_height());h,w=frame.shape[:2];sc=min(cw/w,ch/h)
-        dw=max(1,round(w*sc));dh=max(1,round(h*sc));ox=(cw-dw)/2;oy=(ch-dh)/2
-        im=Image.fromarray(cv2.cvtColor(frame,cv2.COLOR_BGR2RGB)).resize((dw,dh),Image.Resampling.LANCZOS);ph=ImageTk.PhotoImage(im)
+        cw=max(1,canvas.winfo_width());ch=max(1,canvas.winfo_height());h,w=frame.shape[:2]
+        fit=min(cw/w,ch/h);st=self.view_state[side];zoom=max(1.0,float(st.get("zoom",1.0)));sc=fit*zoom
+        cx=float(st["center"][0])*w;cy=float(st["center"][1])*h
+        cx,cy=self._clamp_reference_center(cx,cy,w,h,sc,cw,ch);st["center"]=[cx/w,cy/h]
+        dw=max(1,round(w*sc));dh=max(1,round(h*sc));ox=cw/2-cx*sc;oy=ch/2-cy*sc
+        # Crop to the visible source rectangle *before* creating a Tk image.
+        # At 1:1 on a 4K source this avoids allocating/repainting an entire 4K
+        # PhotoImage for every pan gesture; only the pixels visible in the
+        # reference canvas are converted.  The coordinate transform still
+        # describes the full source image, so A/B and mouse mapping stay exact.
+        rgb=cv2.cvtColor(frame,cv2.COLOR_BGR2RGB)
+        sx0=max(0,int(math.floor((-ox)/sc))); sy0=max(0,int(math.floor((-oy)/sc)))
+        sx1=min(w,int(math.ceil((cw-ox)/sc))); sy1=min(h,int(math.ceil((ch-oy)/sc)))
+        sx1=max(sx0+1,sx1); sy1=max(sy0+1,sy1)
+        crop=Image.fromarray(rgb).crop((sx0,sy0,sx1,sy1))
+        cdx=ox+sx0*sc;cdy=oy+sy0*sc
+        cdw=max(1,round((sx1-sx0)*sc));cdh=max(1,round((sy1-sy0)*sc))
+        if crop.size!=(cdw,cdh):crop=crop.resize((cdw,cdh),Image.Resampling.LANCZOS)
+        ph=ImageTk.PhotoImage(crop)
         if side=="L":self.left_tk=ph
         else:self.right_tk=ph
-        canvas.create_image(ox,oy,image=ph,anchor="nw");self.transforms[side]=(sc,ox,oy,w,h)
+        canvas.create_image(cdx,cdy,image=ph,anchor="nw");self.transforms[side]=(sc,ox,oy,w,h)
         idx=0 if side=="L" else 1
         for lab,color in (("A","#ff3030"),("B","#00cfff")):
             p=self.points[lab][idx]
             if p:
                 x=ox+p[0]*sc;y=oy+p[1]*sc;canvas.create_rectangle(x-5,y-5,x+5,y+5,outline=color,width=2);canvas.create_text(x+8,y-8,text=lab,fill=color,anchor="sw")
+        # Reference metadata is intentionally rendered *inside* each image view
+        # so screenshots retain the exact frame number and reference points.
+        ref=int(self.left_ref.get() if side=="L" else self.right_ref.get())
+        def fmt(p):return "—" if p is None else f"{p[0]:.0f},{p[1]:.0f}"
+        a=self.points["A"][idx];b=self.points["B"][idx]
+        line1=f"{side} frame {ref}   zoom {zoom*100:.0f}%"
+        line2=f"Reference coordinates  A {fmt(a)}   B {fmt(b)}"
+        # Keep reference information directly over the picture, without an
+        # opaque panel.  A tiny shadow keeps white/cyan text readable over
+        # both bright and dark footage while preserving the image underneath.
+        canvas.create_text(13,13,text=line1,fill="#000000",anchor="nw",font=("TkDefaultFont",10,"bold"))
+        canvas.create_text(12,12,text=line1,fill="#f5f8fb",anchor="nw",font=("TkDefaultFont",10,"bold"))
+        canvas.create_text(13,30,text=line2,fill="#000000",anchor="nw",font=("TkDefaultFont",9))
+        canvas.create_text(12,29,text=line2,fill="#9ee8ff",anchor="nw",font=("TkDefaultFont",9))
 
     def _point_from_event(self,side,e):
         tr=self.transforms.get(side)
@@ -2738,6 +3133,7 @@ class VideoWorkflow:
         return (x,y) if 0<=x<w and 0<=y<h else None
 
     def _click(self,side,e):
+        if self.active not in ("A","B"):return
         p=self._point_from_event(side,e)
         if p is None:return
         lab=self.active
@@ -2750,7 +3146,18 @@ class VideoWorkflow:
         else:self.points[lab][1]=p
         self._sync_coords();self._display("L");self._display("R"); self._refresh_overlay_preview()
 
-    def _set_active(self,lab): self.active=lab;self.status.set(f"Click point {lab} in the large left reference frame.")
+    def _set_reference_cursor(self, picking=False):
+        """Use an arrow while A/B placement is armed; pan cursor otherwise."""
+        cur="arrow" if picking else "fleur"
+        for canvas in (getattr(self,"lc",None),getattr(self,"rc",None)):
+            if canvas is not None:
+                try: canvas.configure(cursor=cur)
+                except Exception: pass
+
+    def _set_active(self,lab):
+        self.active=lab
+        self._set_reference_cursor(True)
+        self.status.set(f"Point {lab} armed for ONE click. Click either reference frame; afterwards the canvases return to navigation/pan mode.")
     def clear_points(self,redraw=True):
         self.points={"A":[None,None],"B":[None,None]};self._sync_coords()
         if redraw:self._display("L");self._display("R")
@@ -2819,58 +3226,167 @@ class VideoWorkflow:
         buttons=ttk.Frame(box);buttons.grid(row=8,column=0,columnspan=6,pady=(8,0))
         ok=ttk.Button(buttons,text="OK",command=start_clip);ok.pack(side="left",padx=5);ttk.Button(buttons,text="Close",command=dlg.destroy).pack(side="left",padx=5)
 
-    def _overlay_auto_offset(self,which="A"):
-        labels=("A","B") if str(which).lower() in ("average","avg","both") else (str(which).upper(),)
-        pairs=[self.points[l] for l in labels if self.points.get(l,[None,None])[0] is not None and self.points.get(l,[None,None])[1] is not None]
-        if not pairs:return
-        self.video_overlay_dx.set(sum(p[0][0]-p[1][0] for p in pairs)/len(pairs)); self.video_overlay_dy.set(sum(p[0][1]-p[1][1] for p in pairs)/len(pairs)); self._refresh_overlay_preview()
+    def _prepare_projected_overlay(self):
+        """Render the selected reference pair through the real final-eye pipeline."""
+        if self.left_frame is None or self.right_frame is None:
+            raise ValueError("Load synchronized reference frames first")
+        pts=self._read_coords();hL,wL=self.left_frame.shape[:2];hR,wR=self.right_frame.shape[:2]
+        lp=self._profile("L",wL,hL);rp=self._profile("R",wR,hR);n=384
+        out=render_stereo_exe_geometry(
+            self.left_frame,self.right_frame,lp,rp,pts["A"][0],pts["B"][0],pts["A"][1],pts["B"][1],n,
+            float(self.roll.get()),float(self.pitch.get()),float(self.yaw.get()))
+        out=apply_right_eye_trim_sbs(out,float(self.stereo_x.get()),float(self.stereo_y.get()))
+        rgb=cv2.cvtColor(out,cv2.COLOR_BGR2RGB)
+        self._video_overlay_eye_left=rgb[:,:n].copy();self._video_overlay_eye_right=rgb[:,n:].copy()
+        self._video_overlay_auto_shift=AugenGUI._estimate_projected_overlay_shift(self._video_overlay_eye_left,self._video_overlay_eye_right)
+        # Start the candidate panel at the measured residual alignment.  This
+        # keeps CURRENT on the left untouched and makes ALIGNED CANDIDATE on
+        # the right immediately meaningful.
+        self.video_overlay_dx.set(self._video_overlay_auto_shift[0])
+        self.video_overlay_dy.set(self._video_overlay_auto_shift[1])
+        self._refresh_overlay_preview()
+
+    def _overlay_use_auto(self):
+        dx,dy,response=self._video_overlay_auto_shift;self.video_overlay_dx.set(dx);self.video_overlay_dy.set(dy)
+        self.status.set(f"Projected auto-alignment candidate for fused preview: X {dx:.3f}px, Y {dy:.3f}px (response {response:.3f}).")
+        self._refresh_overlay_preview()
+
+    def _overlay_apply_to_output(self):
+        if self._video_overlay_eye_left is None:return
+        n=float(self._video_overlay_eye_left.shape[1]);dx=float(self.video_overlay_dx.get());dy=float(self.video_overlay_dy.get())
+        self.stereo_x.set(float(self.stereo_x.get())+dx*180.0/n);self.stereo_y.set(float(self.stereo_y.get())+dy*180.0/n)
+        self.status.set(f"Applied candidate to video output: convergence {self.stereo_x.get():.4f}°, vertical {self.stereo_y.get():.4f}°.")
+        self._prepare_projected_overlay()
 
     def _overlay_nudge(self,dx,dy):
-        self.video_overlay_dx.set(float(self.video_overlay_dx.get())+float(dx)); self.video_overlay_dy.set(float(self.video_overlay_dy.get())+float(dy)); self._refresh_overlay_preview()
-
-    def _overlay_drag_start(self,e):
-        self._overlay_drag_state=(e.x,e.y,float(self.video_overlay_dx.get()),float(self.video_overlay_dy.get()))
-
+        self.video_overlay_dx.set(float(self.video_overlay_dx.get())+float(dx));self.video_overlay_dy.set(float(self.video_overlay_dy.get())+float(dy));self._refresh_overlay_preview()
+    def _overlay_drag_start(self,e):self._overlay_drag_state=(e.x,e.y,float(self.video_overlay_dx.get()),float(self.video_overlay_dy.get()))
     def _overlay_drag_motion(self,e):
-        st=getattr(self,'_overlay_drag_state',None); sc=float(getattr(self,'_overlay_view_scale',1.0) or 1.0)
+        st=getattr(self,'_overlay_drag_state',None);sc=float(getattr(self,'_overlay_view_scale',1.0) or 1.0)
         if not st:return
-        self.video_overlay_dx.set(st[2]+(e.x-st[0])/sc); self.video_overlay_dy.set(st[3]+(e.y-st[1])/sc)
+        self.video_overlay_dx.set(st[2]+(e.x-st[0])/sc);self.video_overlay_dy.set(st[3]+(e.y-st[1])/sc)
 
     def open_overlay_preview(self):
         if self.left_frame is None or self.right_frame is None:
-            messagebox.showwarning("Overlay preview", "Load the synchronized reference frames first.", parent=self.win); return
+            messagebox.showwarning("Stereo Align","Load synchronized reference frames first.",parent=self.win);return
         if self.video_overlay_window is None or not self.video_overlay_window.winfo_exists():
-            win=tk.Toplevel(self.win); win.title("Video Stereo Align — synchronized reference frames"); win.geometry("1250x820"); win.minsize(760,520)
-            box=ttk.Frame(win,padding=8); box.pack(fill="both",expand=True); controls=ttk.Frame(box); controls.pack(fill="x")
-            ttk.Label(controls,text="View").pack(side="left"); ttk.Combobox(controls,textvariable=self.video_overlay_mode,values=("Negative align","Alpha blend","Difference","Red/Cyan anaglyph"),state="readonly",width=18).pack(side="left",padx=5)
-            ttk.Label(controls,text="Left opacity").pack(side="left",padx=(8,0)); ttk.Scale(controls,from_=0,to=1,variable=self.video_overlay_alpha,orient="horizontal",command=lambda *_:self._refresh_overlay_preview(),length=150).pack(side="left",padx=5)
-            ttk.Label(controls,text="Right shift X/Y px").pack(side="left",padx=(8,0)); ttk.Spinbox(controls,from_=-10000,to=10000,increment=.1,textvariable=self.video_overlay_dx,width=8).pack(side="left"); ttk.Spinbox(controls,from_=-10000,to=10000,increment=.1,textvariable=self.video_overlay_dy,width=8).pack(side="left")
-            for label,cmd in (("Align A",lambda:self._overlay_auto_offset("A")),("Align B",lambda:self._overlay_auto_offset("B")),("Average",lambda:self._overlay_auto_offset("average")),("Reset",lambda:(self.video_overlay_dx.set(0),self.video_overlay_dy.set(0),self._refresh_overlay_preview()))): ttk.Button(controls,text=label,command=cmd).pack(side="left",padx=2)
-            n=ttk.Frame(box); n.pack(fill="x",pady=(5,0)); ttk.Label(n,text="Nudge right:").pack(side="left")
-            for label,dx,dy in (("←",-1,0),("→",1,0),("↑",0,-1),("↓",0,1),("←0.1",-.1,0),("→0.1",.1,0)): ttk.Button(n,text=label,command=lambda dx=dx,dy=dy:self._overlay_nudge(dx,dy),width=5).pack(side="left",padx=1)
-            ttk.Label(n,text="Preview shift is diagnostic. Use right-eye convergence/vertical trim in Conversion settings to alter final stereo output.").pack(side="left",padx=(10,0))
-            self.video_overlay_canvas=tk.Canvas(box,bg="#202020",highlightthickness=1); self.video_overlay_canvas.pack(fill="both",expand=True,pady=(8,0)); self.video_overlay_canvas.bind("<Configure>",lambda e:self._refresh_overlay_preview()); self.video_overlay_canvas.bind("<ButtonPress-1>",self._overlay_drag_start); self.video_overlay_canvas.bind("<B1-Motion>",self._overlay_drag_motion); self.video_overlay_window=win
-            self.video_overlay_mode.trace_add("write",lambda *_:self._refresh_overlay_preview()); self.video_overlay_dx.trace_add("write",lambda *_:self._refresh_overlay_preview()); self.video_overlay_dy.trace_add("write",lambda *_:self._refresh_overlay_preview())
-        else: self.video_overlay_window.deiconify(); self.video_overlay_window.lift()
-        self._refresh_overlay_preview()
+            win=tk.Toplevel(self.win);win.title("Video Stereo Align — current vs aligned final-eye preview");win.geometry("1450x780");win.minsize(900,520)
+            box=ttk.Frame(win,padding=8);box.pack(fill="both",expand=True);controls=ttk.Frame(box);controls.pack(fill="x")
+            ttk.Label(controls,text="View").pack(side="left");ttk.Combobox(controls,textvariable=self.video_overlay_mode,values=("Perceptual fuse","Negative align","Alpha blend","Difference","Red/Cyan anaglyph"),state="readonly",width=18).pack(side="left",padx=5)
+            ttk.Label(controls,text="Opacity").pack(side="left",padx=(8,0));ttk.Scale(controls,from_=0,to=1,variable=self.video_overlay_alpha,orient="horizontal",length=130,command=lambda *_:self._refresh_overlay_preview()).pack(side="left",padx=5)
+            ttk.Label(controls,text="Candidate right-eye X/Y px").pack(side="left",padx=(8,0));ttk.Spinbox(controls,from_=-500,to=500,increment=.1,textvariable=self.video_overlay_dx,width=8).pack(side="left");ttk.Spinbox(controls,from_=-500,to=500,increment=.1,textvariable=self.video_overlay_dy,width=8).pack(side="left")
+            ttk.Button(controls,text="Auto projected",command=self._overlay_use_auto).pack(side="left",padx=3);ttk.Button(controls,text="Apply to output",command=self._overlay_apply_to_output).pack(side="left",padx=3);ttk.Button(controls,text="Refresh projected view",command=self._prepare_projected_overlay).pack(side="left",padx=3);ttk.Button(controls,text="Reset candidate",command=lambda:(self.video_overlay_dx.set(0),self.video_overlay_dy.set(0),self._refresh_overlay_preview())).pack(side="left",padx=3)
+            nudge=ttk.Frame(box);nudge.pack(fill="x",pady=(5,0));ttk.Label(nudge,text="Nudge candidate:").pack(side="left")
+            for label,dx,dy in (("←",-1,0),("→",1,0),("↑",0,-1),("↓",0,1),("←0.1",-.1,0),("→0.1",.1,0),("↑0.1",0,-.1),("↓0.1",0,.1)):ttk.Button(nudge,text=label,command=lambda dx=dx,dy=dy:self._overlay_nudge(dx,dy),width=5).pack(side="left",padx=1)
+            ttk.Label(nudge,text="LEFT = current fused video-view proxy. RIGHT = aligned candidate fused proxy. Apply to output writes the exact candidate into the final video render.").pack(side="left",padx=(10,0))
+            self.video_overlay_canvas=tk.Canvas(box,bg="#111317",highlightthickness=1);self.video_overlay_canvas.pack(fill="both",expand=True,pady=(8,0));self.video_overlay_canvas.bind("<Configure>",lambda e:self._refresh_overlay_preview());self.video_overlay_canvas.bind("<ButtonPress-1>",self._overlay_drag_start);self.video_overlay_canvas.bind("<B1-Motion>",self._overlay_drag_motion);self.video_overlay_window=win
+            self.video_overlay_mode.trace_add("write",lambda *_:self._refresh_overlay_preview());self.video_overlay_dx.trace_add("write",lambda *_:self._refresh_overlay_preview());self.video_overlay_dy.trace_add("write",lambda *_:self._refresh_overlay_preview())
+        else:self.video_overlay_window.deiconify();self.video_overlay_window.lift()
+        try:self._prepare_projected_overlay()
+        except Exception as e:messagebox.showerror("Stereo Align",str(e),parent=self.video_overlay_window)
 
     def _refresh_overlay_preview(self):
-        win=getattr(self,'video_overlay_window',None); canvas=getattr(self,'video_overlay_canvas',None)
-        if win is None or canvas is None or not win.winfo_exists():return
-        if self.left_frame is None or self.right_frame is None:canvas.delete("all");return
-        cw=max(1,canvas.winfo_width());ch=max(1,canvas.winfo_height())
-        if cw<10 or ch<10:return
-        L=cv2.cvtColor(self.left_frame,cv2.COLOR_BGR2RGB); R=cv2.cvtColor(self.right_frame,cv2.COLOR_BGR2RGB)
-        view=make_alignment_overlay_rgb(L,R,self.video_overlay_alpha.get(),self.video_overlay_mode.get(),self.video_overlay_dx.get(),self.video_overlay_dy.get())
-        bh,bw=view.shape[:2];sc=min((cw-8)/bw,(ch-8)/bh);self._overlay_view_scale=sc;nw=max(1,round(bw*sc));nh=max(1,round(bh*sc));ox=(cw-nw)//2;oy=(ch-nh)//2
-        tkimg=ImageTk.PhotoImage(Image.fromarray(view).resize((nw,nh),Image.Resampling.LANCZOS));canvas.delete("all");canvas.create_image(ox,oy,anchor="nw",image=tkimg);self.video_overlay_tk=tkimg
-        dx=float(self.video_overlay_dx.get());dy=float(self.video_overlay_dy.get())
-        for lab,color in (("A","#00ff7f"),("B","#00cfff")):
-            lp,rp=self.points.get(lab,(None,None))
-            if lp is not None:
-                x=ox+(lp[0]/bw)*nw;y=oy+(lp[1]/bh)*nh;canvas.create_oval(x-6,y-6,x+6,y+6,outline="#ff4d6d",width=2);canvas.create_text(x+8,y-8,text=f"L{lab}",fill="#ff9db0",anchor="sw")
-            if rp is not None:
-                x=ox+((rp[0]+dx)/bw)*nw;y=oy+((rp[1]+dy)/bh)*nh;canvas.create_rectangle(x-6,y-6,x+6,y+6,outline=color,width=2);canvas.create_text(x+8,y+8,text=f"R{lab}",fill=color,anchor="nw")
+        canvas=self.video_overlay_canvas
+        if canvas is None or self.video_overlay_window is None or not self.video_overlay_window.winfo_exists():return
+        L=self._video_overlay_eye_left;R=self._video_overlay_eye_right
+        if L is None or R is None:
+            canvas.delete("all")
+            canvas.create_text(max(1,canvas.winfo_width())//2,max(1,canvas.winfo_height())//2,
+                               text="Preparing projected video alignment preview…",fill="#9aa6b2",
+                               font=("TkDefaultFont",12,"bold"))
+            return
+        cw=max(1,canvas.winfo_width());ch=max(1,canvas.winfo_height());mode=self.video_overlay_mode.get()
+        current=make_alignment_overlay_rgb(L,R,self.video_overlay_alpha.get(),mode,0,0)
+        candidate=make_alignment_overlay_rgb(L,R,self.video_overlay_alpha.get(),mode,self.video_overlay_dx.get(),self.video_overlay_dy.get())
+        h,w=current.shape[:2];gap=6;combo=np.zeros((h,w*2+gap,3),np.uint8);combo[:,:w]=current;combo[:,w+gap:]=candidate
+        sc=min((cw-8)/combo.shape[1],(ch-30)/h);self._overlay_view_scale=sc;nw=max(1,round(combo.shape[1]*sc));nh=max(1,round(h*sc));ox=(cw-nw)//2;oy=max(24,(ch-nh)//2)
+        im=Image.fromarray(combo).resize((nw,nh),Image.Resampling.LANCZOS);ph=ImageTk.PhotoImage(im);canvas.delete("all");canvas.create_image(ox,oy,anchor="nw",image=ph);self.video_overlay_tk=ph
+        canvas.create_text(ox+round(w*sc)/2,8,text="CURRENT FUSED VIDEO VIEW",fill="#d8dde6",anchor="n",font=("TkDefaultFont",11,"bold"));canvas.create_text(ox+round((w+gap+w/2)*sc),8,text="ALIGNED FUSED CANDIDATE",fill="#7ee7ff",anchor="n",font=("TkDefaultFont",11,"bold"));divx=ox+round((w+gap/2)*sc);canvas.create_line(divx,oy,divx,oy+nh,fill="#59616e",width=2)
+
+    def open_output_frame_checker(self):
+        """Open one combined playback + frame-accurate inspection window.
+
+        Playback and frame checking share one visual frame/canvas.  Sequential playback reads
+        frames in decode order (important for HEVC performance); explicit frame
+        changes seek only when the user scrubs, enters an index, or presses the
+        previous/next buttons.
+        """
+        path=self.last_output_path or self.output.get()
+        if not path or not os.path.exists(path):
+            messagebox.showwarning("Output inspector","Generate a video first, or choose an existing output path.",parent=self.win);return
+        cap=cv2.VideoCapture(path)
+        if not cap.isOpened():
+            messagebox.showerror("Output inspector",f"Could not open generated video:\n{path}",parent=self.win);return
+        n=max(1,int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 1)); fps=float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        dlg=tk.Toplevel(self.win);dlg.title("Generated video — unified player / frame inspector");dlg.geometry("1280x820");dlg.minsize(760,520)
+        box=ttk.Frame(dlg,padding=8);box.pack(fill="both",expand=True)
+        frame_var=tk.IntVar(value=0);info=tk.StringVar(value=f"Frame 0 / {n-1}")
+        playing={"value":False};timer={"id":None};holder={"photo":None,"busy":False}
+        controls=ttk.Frame(box);controls.pack(fill="x")
+        play_btn=ttk.Button(controls,text="▶ Play");play_btn.pack(side="left")
+        ttk.Button(controls,text="■ Stop",command=lambda:stop(True)).pack(side="left",padx=4)
+        ttk.Button(controls,text="◀ Previous",command=lambda:show(max(0,frame_var.get()-1),True)).pack(side="left",padx=(10,2))
+        ttk.Button(controls,text="Next ▶",command=lambda:show(min(n-1,frame_var.get()+1),True)).pack(side="left",padx=2)
+        ttk.Label(controls,text="Frame").pack(side="left",padx=(10,3))
+        spin=ttk.Spinbox(controls,from_=0,to=n-1,textvariable=frame_var,width=10);spin.pack(side="left")
+        ttk.Label(controls,textvariable=info).pack(side="left",padx=8)
+        if fps>0:ttk.Label(controls,text=f"{fps:.6g} fps").pack(side="left",padx=8)
+        scale=ttk.Scale(box,from_=0,to=max(0,n-1),orient="horizontal");scale.pack(fill="x",pady=(7,5))
+        canvas=tk.Canvas(box,bg="#111317",highlightthickness=1);canvas.pack(fill="both",expand=True)
+
+        def draw_frame(frame):
+            h,w=frame.shape[:2];cw=max(10,canvas.winfo_width()-8);ch=max(10,canvas.winfo_height()-8)
+            sc=min(cw/w,ch/h);dw=max(1,round(w*sc));dh=max(1,round(h*sc));ox=(canvas.winfo_width()-dw)//2;oy=(canvas.winfo_height()-dh)//2
+            im=Image.fromarray(cv2.cvtColor(frame,cv2.COLOR_BGR2RGB)).resize((dw,dh),Image.Resampling.LANCZOS)
+            ph=ImageTk.PhotoImage(im);canvas.delete("all");canvas.create_image(ox,oy,anchor="nw",image=ph);holder["photo"]=ph
+
+        def update_labels(idx):
+            frame_var.set(idx)
+            holder["busy"]=True
+            try: scale.set(idx)
+            finally: holder["busy"]=False
+            info.set(f"Frame {idx} / {n-1}"+(f"   {idx/fps:.3f} s" if fps>0 else ""))
+
+        def stop(reset=False):
+            playing["value"]=False;play_btn.configure(text="▶ Play")
+            if timer["id"] is not None:
+                try:dlg.after_cancel(timer["id"])
+                except Exception:pass
+                timer["id"]=None
+            if reset:
+                cap.set(cv2.CAP_PROP_POS_FRAMES,0);ok,frame=cap.read()
+                if ok:update_labels(0);draw_frame(frame)
+
+        def show(idx,seek=True):
+            stop(False);idx=max(0,min(n-1,int(float(idx))))
+            if seek:cap.set(cv2.CAP_PROP_POS_FRAMES,idx)
+            ok,frame=cap.read()
+            if ok:
+                actual=max(0,int(cap.get(cv2.CAP_PROP_POS_FRAMES))-1);update_labels(actual);draw_frame(frame)
+
+        def playback_tick():
+            if not playing["value"]:return
+            ok,frame=cap.read()
+            if not ok:stop(False);return
+            idx=max(0,int(cap.get(cv2.CAP_PROP_POS_FRAMES))-1);update_labels(idx);draw_frame(frame)
+            timer["id"]=dlg.after(max(1,round(1000.0/(fps if fps>0 else 30.0))),playback_tick)
+
+        def toggle_play():
+            if playing["value"]:stop(False);return
+            next_idx=min(n-1,frame_var.get()+1);cap.set(cv2.CAP_PROP_POS_FRAMES,next_idx)
+            playing["value"]=True;play_btn.configure(text="❚❚ Pause");playback_tick()
+
+        def scale_changed(v):
+            if holder["busy"]:return
+            show(round(float(v)),True)
+
+        play_btn.configure(command=toggle_play);scale.configure(command=scale_changed)
+        spin.bind("<Return>",lambda e:show(frame_var.get(),True))
+        # Resize redraws the current frame once; it does not start playback.
+        canvas.bind("<Configure>",lambda e:show(frame_var.get(),True))
+        def close():
+            stop(False);cap.release();dlg.destroy()
+        dlg.protocol("WM_DELETE_WINDOW",close);dlg.after_idle(lambda:show(0,True))
 
     def start_conversion(self):
         if self.worker and self.worker.is_alive():return
@@ -2881,7 +3397,7 @@ class VideoWorkflow:
                       left_a=pts["A"][0],left_b=pts["B"][0],right_a=pts["A"][1],right_b=pts["B"][1],
                       left_start=self.left_start.get(),left_end=self.left_end.get(),right_start=self.right_start.get(),right_end=self.right_end.get(),
                       output_width=self.output_width.get(),roll=self.roll.get(),pitch=self.pitch.get(),yaw=self.yaw.get(),
-                      codec=self.codec.get(),fps_mode=self.fps_mode.get(),sampling=self.sampling.get(),
+                      codec=self.codec.get(),fps_mode=self.fps_mode.get(),sampling=self.sampling.get(),length_policy=self.length_policy.get(),
                       right_shift_x_deg=self.stereo_x.get(),right_shift_y_deg=self.stereo_y.get())
         except Exception as e:messagebox.showerror("Video conversion",str(e),parent=self.win);return
         self.cancel_event.clear();self.progress.set(0);self.start_btn.configure(state="disabled");self.cancel_btn.configure(state="normal")
@@ -2895,8 +3411,11 @@ class VideoWorkflow:
         self.worker=threading.Thread(target=run,daemon=True);self.worker.start()
     def cancel_conversion(self):self.cancel_event.set();self.status.set("Cancelling after the current frame…")
     def _finished(self,r):
-        self.progress.set(100);self.status.set(f"Finished {r['frames']} frames -> {r['output']} ({r['width']}×{r['height']}, {r['fps']:.3f} fps, {r['codec']}, timing={r.get('fps_mode','source')})")
-        self.start_btn.configure(state="normal");self.cancel_btn.configure(state="disabled");messagebox.showinfo("Video conversion","Finished video conversion.",parent=self.win)
+        self.progress.set(100);self.status.set(f"Finished {r['frames']} frames -> {r['output']} ({r['width']}×{r['height']}, {r['fps']:.3f} fps, {r['codec']}, timing={r.get('fps_mode','source')}, length={r.get('length_policy','strict')})")
+        self.last_output_path=r.get("output",self.output.get())
+        self.start_btn.configure(state="normal");self.cancel_btn.configure(state="disabled")
+        if self.output_check_btn is not None:self.output_check_btn.configure(state="normal")
+        messagebox.showinfo("Video conversion","Finished video conversion. Use Inspect generated video for playback and frame-by-frame checking.",parent=self.win)
     def _failed(self,msg):
         self.start_btn.configure(state="normal");self.cancel_btn.configure(state="disabled");self.status.set(msg)
         if msg!="Conversion cancelled.":messagebox.showerror("Video conversion",msg,parent=self.win)
@@ -2908,7 +3427,7 @@ def launch_gui(left=None,right=None):
     root=tk.Tk(); app=AugenGUI(root,left,right); root.mainloop()
 
 def parser():
-    q=argparse.ArgumentParser(description='180pyugen v23 — still-image + video VR180'); q.add_argument('--ini',default=None, help='Optional external 180Augen/180Kino.ini; embedded profiles are used by default'); s=q.add_subparsers(dest='cmd',required=True)
+    q=argparse.ArgumentParser(description='180pyugen v35 — still-image + video VR180'); q.add_argument('--ini',default=None, help='Optional external 180Augen/180Kino.ini; embedded profiles are used by default'); s=q.add_subparsers(dest='cmd',required=True)
     x=s.add_parser('profiles'); x.set_defaults(fn=cmd_profiles)
     x=s.add_parser('info'); x.add_argument('--profile',required=True); x.set_defaults(fn=cmd_info)
     x=s.add_parser('test'); x.add_argument('--profile',required=True); x.add_argument('--width',type=int,default=4000); x.add_argument('--height',type=int,default=3000); x.set_defaults(fn=cmd_test)
@@ -2932,7 +3451,7 @@ def parser():
     x.add_argument('--left-start',type=int,default=0); x.add_argument('--left-end',type=int,required=True)
     x.add_argument('--right-start',type=int,default=0); x.add_argument('--right-end',type=int,required=True)
     x.add_argument('--width',type=int,default=4096); x.add_argument('--roll',type=float,default=0); x.add_argument('--pitch',type=float,default=0); x.add_argument('--yaw',type=float,default=0)
-    x.add_argument('--codec',default='auto'); x.add_argument('--fps',type=float,default=None); x.add_argument('--fps-mode',choices=('kino','source'),default='kino'); x.add_argument('--sampling',choices=('fast','native'),default='fast'); x.set_defaults(fn=cmd_video)
+    x.add_argument('--codec',default='auto'); x.add_argument('--fps',type=float,default=None); x.add_argument('--fps-mode',choices=('kino','source'),default='kino'); x.add_argument('--sampling',choices=('fast','hq','native'),default='fast'); x.add_argument('--length-policy',choices=('strict','trim','repeat_last','black'),default='strict'); x.set_defaults(fn=cmd_video)
     x=s.add_parser('clip-video', help='Extract synchronized JPEG reference frames')
     x.add_argument('--left',required=True); x.add_argument('--right',required=True); x.add_argument('--output-dir',default='cut_img')
     x.add_argument('--left-start',type=int,required=True); x.add_argument('--left-end',type=int,required=True); x.add_argument('--right-start',type=int,required=True); x.add_argument('--right-end',type=int,required=True)

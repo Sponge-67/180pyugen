@@ -3,13 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>180pyugen Web v2.12</title>
+<title>180pyugen Web v2.15</title>
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 <header>
   <div>
-    <h1>180pyugen Web v2.12</h1>
+    <h1>180pyugen Web v2.15</h1>
     <div class="tag">Image + video VR180 · Python/OpenCV server renderer</div>
   </div>
   <div class="modeTabs" role="tablist" aria-label="Workflow">
@@ -101,20 +101,20 @@
   </div>
 
   <div id="videoMode" class="modePane hidden">
-    <section class="panel">
+    <section class="panel videoCompactPanel">
       <div class="sectionTitle">Stereo-video VR180 (180Kino workflow)</div>
       <div class="fileBox"><strong>Left movie</strong><div id="vLeftName" class="fileName">not loaded</div><input id="vLeftFile" type="file" accept="video/*,.mp4,.mov,.m4v,.avi,.mkv,.webm" hidden><button type="button" id="vOpenLeft">Open…</button></div>
       <div class="fileBox"><strong>Right movie</strong><div id="vRightName" class="fileName">not loaded</div><input id="vRightFile" type="file" accept="video/*,.mp4,.mov,.m4v,.avi,.mkv,.webm" hidden><button type="button" id="vOpenRight">Open…</button></div>
       <div class="row">
         <button id="vUploadBtn" class="primary">Upload / inspect pair</button>
-        <button id="vGoproPreset">GoPro calibrated profiles</button>
+        <button id="vGoproPreset">GoPro profiles (keep A/B)</button>
         <button id="vEm10Preset">180Kino EM10 profiles</button>
         <button id="vTutorialPreset">180Kino tutorial preset</button>
         <span id="vSessionInfo" class="small">Choose two movies. Large files are uploaded only when you inspect or render.</span>
       </div>
     </section>
 
-    <section class="panel">
+    <section class="panel videoCompactPanel">
       <div class="videoSyncGrid">
         <label>Reference left frame<input id="vLeftRef" type="number" min="0" step="1" value="0"></label>
         <label>Reference right frame<input id="vRightRef" type="number" min="0" step="1" value="0"></label>
@@ -123,7 +123,9 @@
         <label>Left end<input id="vLeftEnd" type="number" min="0" step="1" value="0"></label>
         <label>Right start<input id="vRightStart" type="number" min="0" step="1" value="0"></label>
         <label>Right end<input id="vRightEnd" type="number" min="0" step="1" value="0"></label>
-        <button id="vSyncFull">Use synchronized remaining length</button>
+        <button id="vSyncFull">Trim to shorter remaining</button>
+        <button id="vExtendFull">Use full remaining + extend shorter</button>
+        <label>Length handling<select id="vLengthPolicy"><option value="strict" selected>Require equal</option><option value="trim">Trim shorter</option><option value="repeat_last">Extend: repeat last frame</option><option value="black">Extend: black frames</option></select></label>
         <button id="vClipBtn">JPEG clipping ZIP</button>
         <button id="vClipDownload" disabled>Download JPEG ZIP</button>
         <button id="vPrevPair">◀ Previous pair</button>
@@ -132,7 +134,7 @@
       <div id="vProbeInfo" class="small topSmallGap"></div>
     </section>
 
-    <section class="panel">
+    <section class="panel videoCompactPanel">
       <div class="videoSettingsGrid">
         <label>Left profile<select id="vLeftProfile"></select><span id="vLeftProfileInfo" class="profileInfo"></span></label>
         <label>Right profile<select id="vRightProfile"></select><span id="vRightProfileInfo" class="profileInfo"></span></label>
@@ -148,14 +150,15 @@
       </div>
     </section>
 
-    <section class="panel">
-      <div class="pointbar">
+    <section class="panel videoCompactPanel">
+      <div class="pointbar compactPointbar">
         <strong>Reference A/B:</strong>
-        <label class="inline"><input type="radio" name="vPickPoint" value="A" checked> Pick A</label>
-        <label class="inline"><input type="radio" name="vPickPoint" value="B"> Pick B</label>
+        <label class="inline"><input type="radio" name="vPickPoint" value="navigate" checked> Navigate / pan</label>
+        <label class="inline"><input type="radio" name="vPickPoint" value="A"> Set A (one click)</label>
+        <label class="inline"><input type="radio" name="vPickPoint" value="B"> Set B (one click)</label>
         <label class="inline"><input id="vAutoMatch" type="checkbox" checked> Native auto-match right</label>
-        <button id="vClearPoints">Clear</button>
-        <span class="small">Pick A/B on the synchronized reference frames. The same fixed 3-D alignment is then used for every converted frame.</span>
+        <button id="vClearPoints">Clear</button><button id="vFitRefs">Fit views</button><button id="vOneToOne">1:1 full resolution</button>
+        <span class="small">Drag: pan · wheel: zoom · Set A/B: one click · view stays fixed across frame stepping.</span>
       </div>
       <div class="coords">
         <span></span><strong>Left X</strong><strong>Left Y</strong><strong>Right X</strong><strong>Right Y</strong>
@@ -165,8 +168,8 @@
     </section>
 
     <section class="pickGrid videoReferenceGrid">
-      <div class="canvasWrap"><h3>Left reference frame — large picking view</h3><canvas id="vLeftCanvas" class="pickCanvas"></canvas></div>
-      <div class="canvasWrap"><h3>Right reference frame — auto-match / override</h3><canvas id="vRightCanvas" class="pickCanvas"></canvas></div>
+      <div class="canvasWrap"><h3>Left reference frame</h3><canvas id="vLeftCanvas" class="pickCanvas"></canvas></div>
+      <div class="canvasWrap"><h3>Right reference frame</h3><canvas id="vRightCanvas" class="pickCanvas"></canvas></div>
     </section>
 
     <section class="panel">
