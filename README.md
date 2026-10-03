@@ -278,6 +278,11 @@ The Stereo Align window now defaults to **Perceptual fuse**. This is a best-effo
 - Upper video synchronization, profile, and A/B control panels use tighter spacing and shorter labels so more of the reference images stay visible.
 
 
-## v2.15 GoPro video-preset correction
+## v2.15 general-purpose dynamic video + high-quality encoding
 
-The GoPro video button now selects only the calibrated left/right lens profiles and **preserves the video's A/B points**. Earlier builds incorrectly copied A/B from the supplied 1792x2048 still calibration scene into unrelated video. A/B are capture-specific stereo-correspondence points, not lens-calibration constants, so that could apply a completely wrong 3-D stereo rotation. The UI also warns when a video frame's aspect ratio differs materially from the 1792x2048 calibration source because a different GoPro digital-lens/crop/stabilisation mode may require video-specific calibration.
+Static mode preserves the 180Kino-style fixed stereo geometry. General dynamic mode adds projected-eye residual correction using ORB/RANSAC, Farneback dense optical flow + RANSAC, or phase correlation, with temporal smoothing and deliberately damped horizontal correction. HEVC encoding is now quality-driven (CRF/CQ) with Compact, Standard, High, Very high, Master and Lossless presets, plus optional mild post-resample sharpening.
+
+
+## v2.16 anti-alias / de-jag video option
+
+Video conversion adds **De-jag / anti-alias** with `off`, `adaptive`, and `strong`. Adaptive is the recommended default at strength `0.45`: it detects strong projected edges using a soft Sobel mask and applies a tiny coverage filter only around those edges, with extra emphasis on diagonal stair-step patterns. Strong widens the treatment. The pass runs independently per eye after dynamic correction and optional sharpening, before encoding. `off` preserves the previous output path for parity tests.

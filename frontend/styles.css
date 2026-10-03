@@ -60,3 +60,5 @@ body.theme-dark .infoTable th,body.theme-dark .infoTable td{border-color:var(--b
 .videoReferenceGrid .pickCanvas{cursor:grab;touch-action:none}
 .videoReferenceGrid .pickCanvas.pointPick{cursor:default!important}
 .videoReferenceGrid .pickCanvas.pointPick:active{cursor:default!important}
+
+.dynamicOnly{transition:opacity .15s ease}

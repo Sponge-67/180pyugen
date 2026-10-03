@@ -47,8 +47,17 @@ class VideoRenderRequest(BaseModel):
     yaw: float = 0.0
     codec: str = "auto"
     fps_mode: Literal["kino", "source"] = "kino"
-    sampling: Literal["fast", "hq", "native"] = "fast"
+    sampling: Literal["fast", "hq", "native"] = "hq"
     length_policy: Literal["strict", "trim", "repeat_last", "black"] = "strict"
+    video_mode: Literal["static", "general"] = "static"
+    dynamic_method: Literal["orb_ransac", "dense_flow", "phase"] = "orb_ransac"
+    dynamic_smoothing: float = Field(default=0.85, ge=0.0, le=0.995)
+    dynamic_horizontal_strength: float = Field(default=0.15, ge=0.0, le=1.0)
+    dynamic_max_px: float = Field(default=64.0, ge=1.0, le=512.0)
+    encode_quality: Literal["compact", "standard", "high", "very_high", "master", "lossless"] = "high"
+    sharpen: float = Field(default=0.15, ge=0.0, le=1.5)
+    dejag_mode: Literal["off", "adaptive", "strong"] = "adaptive"
+    dejag_strength: float = Field(default=0.45, ge=0.0, le=1.0)
     right_shift_x_deg: float = 0.0
     right_shift_y_deg: float = 0.0
     output_name: str = "VROut.mp4"

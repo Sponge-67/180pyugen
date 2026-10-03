@@ -3,13 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>180pyugen Web v2.15</title>
+<title>180pyugen Web v2.16</title>
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 <header>
   <div>
-    <h1>180pyugen Web v2.15</h1>
+    <h1>180pyugen Web v2.16</h1>
     <div class="tag">Image + video VR180 · Python/OpenCV server renderer</div>
   </div>
   <div class="modeTabs" role="tablist" aria-label="Workflow">
@@ -102,12 +102,12 @@
 
   <div id="videoMode" class="modePane hidden">
     <section class="panel videoCompactPanel">
-      <div class="sectionTitle">Stereo-video VR180 (180Kino workflow)</div>
+      <div class="sectionTitle">Stereo-video VR180 — Static / General</div>
       <div class="fileBox"><strong>Left movie</strong><div id="vLeftName" class="fileName">not loaded</div><input id="vLeftFile" type="file" accept="video/*,.mp4,.mov,.m4v,.avi,.mkv,.webm" hidden><button type="button" id="vOpenLeft">Open…</button></div>
       <div class="fileBox"><strong>Right movie</strong><div id="vRightName" class="fileName">not loaded</div><input id="vRightFile" type="file" accept="video/*,.mp4,.mov,.m4v,.avi,.mkv,.webm" hidden><button type="button" id="vOpenRight">Open…</button></div>
       <div class="row">
         <button id="vUploadBtn" class="primary">Upload / inspect pair</button>
-        <button id="vGoproPreset">GoPro profiles (keep A/B)</button>
+        <button id="vGoproPreset">GoPro calibrated profiles</button>
         <button id="vEm10Preset">180Kino EM10 profiles</button>
         <button id="vTutorialPreset">180Kino tutorial preset</button>
         <span id="vSessionInfo" class="small">Choose two movies. Large files are uploaded only when you inspect or render.</span>
@@ -139,9 +139,18 @@
         <label>Left profile<select id="vLeftProfile"></select><span id="vLeftProfileInfo" class="profileInfo"></span></label>
         <label>Right profile<select id="vRightProfile"></select><span id="vRightProfileInfo" class="profileInfo"></span></label>
         <label>Output width<select id="vOutputWidth"><option>2048</option><option selected>4096</option><option>6144</option><option>8192</option></select></label>
-        <label>Sampling<select id="vSampling"><option value="fast" selected>Fast Linear · optimized maps</option><option value="hq">High Quality Lanczos4</option><option value="native">Native-style exact</option></select></label>
+        <label>Sampling<select id="vSampling"><option value="fast">Fast Linear · optimized maps</option><option value="hq" selected>High Quality Lanczos4</option><option value="native">Native-style exact</option></select></label>
         <label>Codec<select id="vCodec"><option value="auto">Auto</option><option value="hevc" selected>HEVC / H.265 (native-like)</option><option value="hevc-nvenc">HEVC NVENC</option><option value="mp4v">mp4v</option><option value="avc1">H.264 / avc1</option><option value="MJPG">MJPG</option></select></label>
         <label>Timing<select id="vFpsMode"><option value="kino" selected>180Kino rounded FPS</option><option value="source">Preserve source FPS</option></select></label>
+        <label>Video mode<select id="vVideoMode"><option value="static" selected>Static / 180Kino</option><option value="general">General dynamic</option></select></label>
+        <label class="dynamicOnly">Dynamic algorithm<select id="vDynamicMethod"><option value="orb_ransac" selected>ORB + RANSAC · balanced</option><option value="dense_flow">Farneback flow + RANSAC · HQ</option><option value="phase">Phase correlation · fast</option></select></label>
+        <label class="dynamicOnly">Temporal smoothing<input id="vDynamicSmoothing" type="number" min="0" max="0.995" step="0.01" value="0.85"></label>
+        <label class="dynamicOnly">Horizontal strength<input id="vDynamicHorizontal" type="number" min="0" max="1" step="0.05" value="0.15"></label>
+        <label class="dynamicOnly">Max dynamic px<input id="vDynamicMaxPx" type="number" min="1" max="512" step="1" value="64"></label>
+        <label>Encode quality<select id="vEncodeQuality"><option value="compact">Compact</option><option value="standard">Standard</option><option value="high" selected>High</option><option value="very_high">Very high</option><option value="master">Master</option><option value="lossless">Lossless software HEVC · huge</option></select></label>
+        <label>Post sharpen<input id="vSharpen" type="number" min="0" max="1.5" step="0.05" value="0.15"></label>
+        <label>De-jag / anti-alias<select id="vDejagMode"><option value="off">Off · parity / no filtering</option><option value="adaptive" selected>Adaptive edge AA · recommended</option><option value="strong">Strong de-jag · more smoothing</option></select></label>
+        <label>AA strength<input id="vDejagStrength" type="number" min="0" max="1" step="0.05" value="0.45"></label>
         <label>Roll °<input id="vRoll" type="number" step="0.01" value="0"></label>
         <label>Pitch °<input id="vPitch" type="number" step="0.01" value="0"></label>
         <label>Yaw °<input id="vYaw" type="number" step="0.01" value="0"></label>
@@ -237,7 +246,7 @@
         <li><strong>Sample and pack:</strong> sample left/right sources, create one square eye per view, then pack them side by side.</li>
       </ol>
 
-      <h3>3. Video pipeline</h3>
+      <h3>3. General-purpose dynamic video mode</h3><p><strong>Static / 180Kino</strong> keeps one calibrated stereo transform for the full clip. <strong>General dynamic</strong> adds a residual frame-by-frame correction after final-eye projection. Balanced mode uses ORB keypoints + Hamming matching + RANSAC similarity estimation; HQ uses dense Farneback optical flow followed by a robust similarity fit; phase correlation is a fast translation fallback. Corrections are temporally smoothed. Vertical disparity and roll are corrected strongly, while horizontal correction is deliberately attenuated because horizontal disparity also encodes stereo depth.</p><p>This is a general computer-vision implementation, not a reproduction of any proprietary Canon or Kandao algorithm.</p><h3>4. Video pipeline</h3>
       <p>Video uses the same geometry but separates one-time setup from per-frame work. When both movies are selected, the browser now uploads/probes them and automatically displays the current left/right reference frames. The explicit <em>Load reference frames</em> button remains useful after changing the frame numbers.</p>
       <ol>
         <li>Probe both movies for resolution, frame count, FPS and codec.</li>
@@ -281,7 +290,8 @@
 
       <h3>10. Native parity status</h3>
       <p>180pyugen is a clean-room reconstruction rather than the original source. Several still-image behaviors have been recovered and quantitatively validated against native 180Augen output. The original 180Kino used CUDA and a GPU conversion kernel, so exact video pixel parity remains an explicit comparison target. The application therefore exposes separate performance and native-comparison modes instead of claiming that every optimized path is instruction-identical.</p>
-    </section>
+          <p><strong>De-jag / anti-alias.</strong> Nonlinear fisheye-to-equirectangular warping can undersample thin straight high-contrast features, causing staircase/zig-zag edges or crawling. Adaptive edge AA uses a temporally stable soft Sobel mask and a tiny coverage filter only around strong edges, emphasizing diagonals. Strong mode applies a wider treatment. Each eye is processed independently, so the SBS center seam cannot bleed. Use Off for native/parity comparisons.</p>
+</section>
   </div>
 
 </main>
